@@ -37,12 +37,19 @@ def split_of(ds: dict, k: int, cfg: dict) -> np.ndarray:
                          float(cfg["TEST_FRACTION"]))
 
 
-def window_means(ds: dict, scores: np.ndarray) -> np.ndarray:
-    """Mean of per-attachment scores over each sample's window [lo, hi); 0 if empty."""
-    S = np.concatenate([np.zeros((1, scores.shape[1])), np.cumsum(scores, 0)])
+def window_means(ds: dict, scores: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+    """Mean of per-attachment scores over each sample's window [lo, hi); 0 if empty.
+
+    Computed in column blocks so the cumulative sums never hold all columns.
+    """
     lo, hi = ds["lo"].numpy(), ds["hi"].numpy()
     n = (hi - lo)[:, None]
-    return np.where(n > 0, (S[hi] - S[lo]) / np.maximum(n, 1), 0.0)
+    out = np.empty((len(lo), scores.shape[1])) if out is None else out
+    for c in range(0, scores.shape[1], 64):
+        S = np.concatenate([np.zeros((1, min(64, scores.shape[1] - c))),
+                            np.cumsum(scores[:, c:c + 64], 0)])
+        out[:, c:c + 64] = np.where(n > 0, (S[hi] - S[lo]) / np.maximum(n, 1), 0.0)
+    return out
 
 
 def _chunks(idx: np.ndarray, size: int = 65536):
@@ -83,31 +90,41 @@ def fit_split(ds: dict, k: int, cfg: dict, E: np.ndarray) -> dict:
                              for c in _chunks(np.arange(len(E)))])
     shuf = np.random.default_rng(k).choice(rows, len(att))
 
-    def text(src):
-        T = _z(window_means(ds, scores[src]), tr)
-        T[empty] = 0.0                                   # an empty window: train mean
-        return T
-
     one = np.ones((len(y), 1))
     price = np.c_[one, _z(ctx[:, :n_price], tr)]
     inten = np.c_[price, _z(ctx[:, n_price:], tr)]
+    q = inten.shape[1]
+
+    def design(src):                     # [intensity | text PCs], filled in place
+        A = np.empty((len(y), q + max(PCS)))
+        A[:, :q] = inten
+        T = window_means(ds, scores[src], A[:, q:])
+        mu_t, sd_t = T[tr].mean(0), T[tr].std(0)
+        T -= mu_t
+        T /= np.where(sd_t > 0, sd_t, 1.0)
+        T[empty] = 0.0                                   # an empty window: train mean
+        return A
     out = {"split": k, "idx": te}
     w_har = fit_qlike(price[tr], y[tr])
     out["HAR"] = price[te] @ w_har
     w_int = fit_qlike(inten[tr], y[tr])
     out["intensity"] = inten[te] @ w_int
     sel = {}
-    for name, T in (("text", text(att)), ("shuffled", text(shuf))):
+    for name, src in (("text", att), ("shuffled", shuf)):
+        A = design(src)
         best = None
         for npc in PCS:
-            A = np.c_[inten, T[:, :npc]]
+            cols = slice(0, q + npc)
+            Atr = A[tr, cols]
             w = np.r_[w_int, np.zeros(npc)]              # warm start at the intensity fit
             for lam in sorted(RIDGE, reverse=True):
-                pen = np.r_[np.zeros(inten.shape[1]), np.full(npc, lam)]
-                w = fit_qlike(A[tr], y[tr], pen, w0=w)
-                v = float(qlike(A[va] @ w, y[va]).mean())
+                pen = np.r_[np.zeros(q), np.full(npc, lam)]
+                w = fit_qlike(Atr, y[tr], pen, w0=w)
+                v = float(qlike(A[va, cols] @ w, y[va]).mean())
                 if best is None or v < best[0]:
-                    best = (v, npc, lam, A[te] @ w)
+                    best = (v, npc, lam, A[te, cols] @ w)
+            del Atr
+        del A
         out[name] = best[3]
         sel[name] = {"val_qlike": best[0], "pcs": best[1], "ridge": best[2]}
     out["persistence"] = ds["prev"].numpy()[te].astype(np.float64)

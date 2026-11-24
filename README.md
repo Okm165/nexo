@@ -68,7 +68,7 @@ QLIKE(h, y) = e^(y−h) − (y−h) − 1        y = log proxy variance
 
 QLIKE ranks forecasts as the true variance would even though a week of
 returns measures it noisily (Patton 2011). MSE on log vol does not have that
-property. QLIKE is convex, so the fit is exact (damped Newton, float64),
+property. QLIKE is convex, so the fit is exact (damped Newton, float64, Hessian on the GPU when present),
 with no SGD, no seeds and no epochs.
 
 **Text features**, per split, from train data only:
@@ -91,9 +91,15 @@ apply to every stock, and each stock's own variance lookbacks carry its
 level.
 
 **Components.** k was chosen on validation from {4, 16, 64}, then
-{16, 64, 256} once 64 won all 10 splits. 256 now wins 8 of 10 with
-diminishing gains (split 0: 0.3608 → 0.3581). The full 768 dimensions were
-not tried.
+{16, 64, 256} once 64 won all 10 splits; 256 then won 8 of 10. The full
+embedding was tried as well, with grid {64, 256, 768}, and validation chose
+768 in 6/10 splits (+0.2% on validation). On test it was worse: universe
++0.46% ± 1.10% against +0.76% ± 1.11%, and the shuffled control fell from
+−0.52% to −0.78%, which is overfitting. The shipped grid is back to
+{16, 64, 256}. That revert was informed by test, so treat the +0.76% below
+as slightly optimistic; the protocol-clean figure for the larger grid is
++0.46%. Both say the same thing: a content effect of about +0.5–0.8%, and
+extra capacity does not raise it.
 
 ## Controls and benchmarks
 
