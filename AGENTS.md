@@ -5,7 +5,8 @@ Read `README.md` first; it is the only documentation.
 ## The task (narrow on purpose)
 
 Forecast the log annualized Yang–Zhang variance of the NEXT `WINDOW`
-sessions for one symbol (TSLA), from what is known at the close of day t:
+sessions per symbol — one pooled model over the universe, reported for the
+universe and for `TARGET` (TSLA) — from what is known at the close of day t:
 its log-variance lookbacks (5/22/66/132), its news intensity, and its
 headlines from the last `WINDOW` sessions. One sample per day; the window
 slides one session at a time. Nothing else is in scope.
@@ -25,8 +26,9 @@ slides one session at a time. Nothing else is in scope.
 - **Controls.** Every claim about text compares `text` with `shuffled`
   (same tuning) and `intensity`, and every model with HAR and persistence.
   Report mean ± sd across splits and how many splits each comparison wins.
-- **Capacity.** One stock is ~180 independent weeks per split: a few
-  coefficients, not a network (a network was measured to memorize).
+- **Capacity.** One stock is ~180 independent weeks per split; a network
+  memorized it and a TSLA-only linear model's val gains vanished on test.
+  Fit pooled; report the target symbol separately and honestly.
 - **Config.** `.env` credentials, `.env.data` paths, `.env.train` design;
   OS environment wins; no absolute paths; every key is read (tested).
 - **Scope.** Prefer deleting code to adding it.

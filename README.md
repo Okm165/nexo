@@ -1,10 +1,11 @@
 # newsimpact
 
-Forecast how volatile a stock (default **TSLA**) will be over the **next
-window** of trading sessions, from what is known **at today's close**: its
-price history and the headlines written about it during the **previous
-window**. The window slides one session at a time, so every trading day is a
-sample.
+Forecast how volatile a stock will be over the **next window** of trading
+sessions, from what is known **at today's close**: its price history and the
+headlines written about it during the **previous window**. The window slides
+one session at a time, so every trading day is a sample. One model is fitted
+across a universe of stocks (1,159 by default), and results are reported for
+the universe and for a target stock (`TARGET`, default **TSLA**).
 
 The output is a number: annualized variance (shown as vol %) of the next
 `WINDOW` sessions (default 5), the unit an implied-volatility quote uses. It
@@ -81,12 +82,18 @@ with no SGD, no seeds and no epochs.
 A ridge penalty λ applies to the text coefficients only. The number of
 components k ∈ {1, 2, 4, 8, 16} and λ are chosen on validation.
 
-**Why linear.** One stock gives about 880 training days per split. Because
-target windows overlap, that is only about 180 independent weeks. A neural
-attention model memorized it completely (train QLIKE 0.02) and never beat
-its HAR starting point on validation, and a shuffled-headline network
-memorized just as well. The data supports a few coefficients, not a
-network.
+**One model for all stocks.** One stock gives about 180 independent weeks
+per split. On TSLA alone, a neural attention model memorized its training
+data (train QLIKE 0.02) and never beat its HAR starting point on validation,
+and a linear text model's validation gains vanished on test. Pooling 1,159
+stocks gives about 1.1M training samples per split. The same coefficients
+apply to every stock, and each stock's own variance lookbacks carry its
+level.
+
+**Components.** k was chosen on validation from {4, 16, 64}, then
+{16, 64, 256} once 64 won all 10 splits. 256 now wins 8 of 10 with
+diminishing gains (split 0: 0.3608 → 0.3581). The full 768 dimensions were
+not tried.
 
 ## Controls and benchmarks
 
@@ -107,7 +114,7 @@ network.
   its headline window to the last session of its target window, lies in one
   split. No target session and no headline is shared across splits; this
   purge costs about 20% of samples.
-- **Repeated.** `SPLITS` = 20 independent random assignments. Results are
+- **Repeated.** `SPLITS` = 10 independent random assignments. Results are
   mean ± sd across splits plus the number of splits each comparison wins, so
   no conclusion rests on one draw of test months.
 - **Train-only statistics.** Feature scaling, embedding standardization,
@@ -117,33 +124,44 @@ network.
 - **Diebold–Mariano tests on QLIKE** for every split. The Newey–West
   variance uses lag W−1, counted only within contiguous test blocks.
 
-## Results — TSLA, next-5-session vol, 20 splits (~150 test days each)
+## Results — pooled fit, next-5-session vol, 10 random purged block splits
 
-| predictor | QLIKE | skill vs HAR | better than HAR in | Spearman |
+Universe (about 155k test samples per split):
+
+| predictor | QLIKE | skill vs HAR | text better in | Spearman |
 |---|---|---|---|---|
-| persistence | 0.323 ± 0.128 | −59.4% | 2/20 | 0.42 |
-| HAR | 0.200 ± 0.046 | 0 | — | 0.41 |
-| intensity | 0.195 ± 0.044 | +2.1% ± 5.8% | 12/20 | 0.43 |
-| shuffled | 0.200 ± 0.042 | −1.0% ± 7.5% | — | 0.41 |
-| text | 0.212 ± 0.063 | −6.7% ± 25.6% | 6/20 | 0.40 |
+| persistence | 0.936 ± 0.717 | −155% | — | 0.824 |
+| HAR | 0.363 ± 0.023 | 0 | 8/10 | 0.866 |
+| intensity | 0.364 ± 0.023 | −0.11% ± 0.20% | 8/10 | 0.865 |
+| shuffled | 0.365 ± 0.023 | −0.52% ± 0.40% | **10/10** | 0.864 |
+| **text** | **0.360 ± 0.023** | **+0.76% ± 1.11%** | — | 0.861 |
 
-Text vs shuffled: text is better in only 5/20 splits (mean DM t = +0.38).
+TSLA (about 144 test days per split):
 
-What this shows:
-- **On TSLA alone, headline content does not improve next-week volatility
-  forecasts out of sample.** On validation the text model beat HAR in 18/20
-  splits; on test it does not. Choosing among 30 (k, λ) settings on about
-  150 validation days fits noise, and the test set exposes it.
-- **News intensity may help slightly** (+2%, 12/20 splits), but the effect
-  is not significant.
-- **HAR beats persistence robustly** (18/20). The evaluation separates real
-  differences from noise.
-- **Calibration** of the text model on pooled test: predicted 40.0 / 53.6 /
-  76.5% against realized 42.7 / 52.6 / 73.3% for deciles 1 / 5 / 10.
-- **Consistent with the 1,159-stock run** of the earlier design (380k test
-  samples): there, content added about 1% beyond news volume and timing.
-  An effect that small needs far more than one stock's 180 independent
-  weeks to detect.
+| predictor | QLIKE | skill vs HAR | text better in |
+|---|---|---|---|
+| HAR | 0.210 ± 0.042 | 0 | 4/10 |
+| intensity | 0.210 ± 0.042 | −0.19% ± 0.60% | 4/10 |
+| shuffled | 0.209 ± 0.042 | +0.11% ± 1.17% | 4/10 |
+| text | 0.209 ± 0.043 | +0.31% ± 4.02% | — |
+
+What this supports, and what it does not:
+- **Across stocks, headline content improves next-week volatility
+  forecasts, by a small amount**: +0.76% QLIKE over HAR. It beats the
+  shuffled-headline control in 10/10 splits and HAR in 8/10. The controls
+  gain nothing: news volume alone is −0.11%, and shuffled content −0.52%,
+  so the gain is content, not added flexibility.
+- **It is not significant within any single split** (mean DM t −1.2 to
+  −1.7). The splits reuse the same data, so 10/10 is consistent evidence,
+  not ten independent tests.
+- **Validation overstated it.** Validation gains were 1–4%; test gives
+  0.76%, and only test is reported as the result.
+- **TSLA alone: no detectable effect** (+0.31% ± 4.02%, 4/10). An effect
+  of about 1% cannot be resolved with about 144 test days per split. The
+  TSLA-only fit, before pooling, was −6.7% ± 25.6%.
+- **Calibration** (pooled test, universe, predicted → realized vol by
+  decile): 21.0 → 19.8%, 41.2 → 39.0%, 67.6 → 69.3%, 136.5 → 149.3%.
+- **HAR beats persistence in every split**; the benchmark is strong.
 
 ## Quick start
 
@@ -161,9 +179,10 @@ and λ) and `eval.json`.
 
 ## Configuration
 
-`.env.data` holds `SYMBOLS`, `START` and the paths; `.env.train` holds
+`.env.data` holds `SYMBOLS` (a comma list, or `@file` with one symbol per
+line, e.g. `@data/input/symbols.txt`), `START` and the paths; `.env.train` holds
 `WINDOW` (5), `SAMPLE_START` (2021-01-01), `BLOCK` (21), `VAL_FRACTION` /
-`TEST_FRACTION` (0.15) and `SPLITS` (20). `.env` holds credentials, needed
+`TEST_FRACTION` (0.15), `SPLITS` (10) and `TARGET` (TSLA). `.env` holds credentials, needed
 only by the fetchers. The OS environment overrides any key. Paths are
 repo-relative and inputs are plain parquet, so any source with the same
 columns works.
@@ -184,9 +203,8 @@ scripts/run.sh  the whole pipeline
 
 ## Limits
 
-- One stock gives about 180 independent weeks per split, which is too few to
-  detect a content effect of the ~1% size seen across 1,159 stocks. Pooling
-  stocks for training and scoring TSLA is the way to gain power.
+- A single stock's test period is too small to detect a ~1% effect. The TSLA
+  numbers are reported, but they cannot confirm or rule out the effect.
 - The Alpaca news API on this account serves only recent news (from
   2026-04). The 2021–2026 archive comes from earlier collection.
 - Price lookbacks reach across split blocks. They contain no target of

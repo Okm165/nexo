@@ -19,11 +19,14 @@ def qlike(h: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 def fit_qlike(A: np.ndarray, y: np.ndarray, penalty: np.ndarray | None = None,
-              iters: int = 100) -> np.ndarray:
-    """argmin_w mean QLIKE(A w, y) + Σ penalty_j w_j²  (convex; damped Newton)."""
+              w0: np.ndarray | None = None, iters: int = 100) -> np.ndarray:
+    """argmin_w mean QLIKE(A w, y) + Σ penalty_j w_j²  (convex; damped Newton).
+
+    The optimum does not depend on the start; `w0` only saves iterations.
+    """
     A, y = A.astype(np.float64), y.astype(np.float64)
     P = np.diag(np.zeros(A.shape[1]) if penalty is None else penalty)
-    w = np.linalg.lstsq(A, y, rcond=None)[0]                 # log-OLS start
+    w = np.linalg.lstsq(A, y, rcond=None)[0] if w0 is None else w0.astype(np.float64)
 
     def f(w):
         return qlike(A @ w, y).mean() + w @ P @ w

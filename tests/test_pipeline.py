@@ -61,7 +61,7 @@ def world(tmp_path_factory):
            "EMB_PREFIX": str(tmp / "emb_s"), "DATASET": str(tmp / "ds.pt"),
            "STATE_DIR": str(tmp), "WINDOW": str(W), "SAMPLE_START": "2023-01-02",
            "BLOCK": "21", "VAL_FRACTION": "0.15", "TEST_FRACTION": "0.15",
-           "SPLITS": "3"}
+           "SPLITS": "3", "TARGET": "AAA"}
     return cfg, dataset.build(cfg), bars, news, days
 
 
@@ -147,13 +147,16 @@ def test_blocked_split_shares_nothing_across_splits(world):
                 assert by_pos.get(q, s) == s
 
 
-def test_window_sums_match_direct_means(world):
+def test_window_means_equal_projected_window_mean(world):
+    """Averaging per-headline scores equals scoring the window's mean headline."""
     _, ds, _, _, _ = world
     E = ds["emb"].numpy().astype(np.float64)
-    sums = train.window_sums(ds, ds["att_emb"].numpy(), E)
+    V = np.random.default_rng(0).normal(size=(768, 3))
+    got = train.window_means(ds, E[ds["att_emb"].numpy()] @ V)
     i = int(np.argmax((ds["hi"] - ds["lo"]).numpy()))
     lo, hi = int(ds["lo"][i]), int(ds["hi"][i])
-    assert np.allclose(sums[i], E[ds["att_emb"][lo:hi].numpy()].sum(0))
+    assert np.allclose(got[i], E[ds["att_emb"][lo:hi].numpy()].mean(0) @ V)
+    assert (got[(ds["hi"] == ds["lo"]).numpy()] == 0).all()
 
 
 def test_fit_and_evaluate_end_to_end(world):
@@ -161,7 +164,8 @@ def test_fit_and_evaluate_end_to_end(world):
     cfg = cfg | {"SPLITS": "3"}
     train.run(cfg)
     rep = evaluate.main(cfg)
-    assert set(rep["qlike"]) == {"persistence", "HAR", "intensity", "shuffled", "text"}
-    assert rep["n_splits"] == 3
-    for s in rep["splits"]:                  # HAR's train-optimal fit is the reference
-        assert np.isfinite(list(s["qlike"].values())).all()
+    for scope in ("universe", "AAA"):
+        r = rep[scope]
+        assert set(r["qlike"]) == {"persistence", "HAR", "intensity", "shuffled", "text"}
+        assert r["n_splits"] == 3
+        assert all(np.isfinite(list(s["qlike"].values())).all() for s in r["splits"])
