@@ -163,6 +163,24 @@ What this supports, and what it does not:
   decile): 21.0 → 19.8%, 41.2 → 39.0%, 67.6 → 69.3%, 136.5 → 149.3%.
 - **HAR beats persistence in every split**; the benchmark is strong.
 
+Diagnosis of the result (test predictions, no refitting; so the test set
+has been looked at for this analysis):
+- **QLIKE is tail-dominated.** The worst 1% of samples hold 29–44% of each
+  split's HAR loss, so a split's result depends on which extreme weeks
+  land in it. This is why validation gains (1–4%) overstated test (0.76%).
+  The effective sample is far smaller than 155k.
+- **The gain is concentrated in time.** Text lowers the loss in 33 of 58
+  test months; the best 5 months give 84% of the net gain, and the worst 5
+  cancel 63%.
+- **The gain grows with the number of headlines** (ex ante, pooled test):
+  0 headlines −1.3%, 1 −2.5%, 2–3 +1.2%, 4–7 +3.3%, 8–15 +4.1%, 16+
+  +5.9%. Information comes from aggregating headlines. Windows with 0–1
+  headlines (45% of samples) are worse than HAR.
+- **Tried and rejected on validation:** empirical-Bayes shrinkage of each
+  window mean toward neutral by n/(n + σ²_w/σ²_b). It was better in only
+  3/10 splits on validation, so it was reverted without being scored on
+  test.
+
 ## Quick start
 
 ```bash
