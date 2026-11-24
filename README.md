@@ -59,12 +59,26 @@ of its precision.
 
 ## Model
 
-A linear forecast of log variance, fitted by **QLIKE**:
+A linear forecast of log variance, fitted by **QLIKE**, with a per-stock
+level (a fixed-effects panel regression):
 
 ```
-h = w · [1, log-variance lookbacks, news intensity, text PCs]
-QLIKE(h, y) = e^(y−h) − (y−h) − 1        y = log proxy variance
+y − level[s] = w · (x − mean[s])         fitted on all stocks at once
+h            = w · (x − mean[s]) + level[s]
+x            = [1, log-variance lookbacks, news intensity, text PCs]
+QLIKE(h, y)  = e^(y−h) − (y−h) − 1       y = log proxy variance
 ```
+
+`level[s]` is `log mean(e^y)` over that stock's **train** targets — the exact
+QLIKE-optimal location, which is not the mean of log variance. `mean[s]` is
+the stock's train mean of a feature. Each stock's permanent volatility level
+is therefore estimated from all of its train days, and the pooled slope
+describes how a stock moves away from its own norm. The transformation is
+exact — QLIKE depends only on `y − h` — so it adds no parameter to the solver
+and no knob; a stock absent from a split's train samples takes the pooled
+level. Without it, the four noisy lookbacks were the only route by which the
+model could see a stock's level; fixing that improved the benchmark by 6.9%
+on validation and 5.4% on test.
 
 QLIKE ranks forecasts as the true variance would even though a week of
 returns measures it noisily (Patton 2011). MSE on log vol does not have that
@@ -80,15 +94,15 @@ with no SGD, no seeds and no epochs.
    scores.
 
 A ridge penalty λ applies to the text coefficients only. The number of
-components k ∈ {1, 2, 4, 8, 16} and λ are chosen on validation.
+components k ∈ {16, 64, 256} and λ ∈ {1e−3, 1e−2, 1e−1} are chosen on
+validation.
 
 **One model for all stocks.** One stock gives about 180 independent weeks
 per split. On TSLA alone, a neural attention model memorized its training
 data (train QLIKE 0.02) and never beat its HAR starting point on validation,
 and a linear text model's validation gains vanished on test. Pooling 1,159
-stocks gives about 1.1M training samples per split. The same coefficients
-apply to every stock, and each stock's own variance lookbacks carry its
-level.
+stocks gives about 1.1M training samples per split. One slope applies to
+every stock; the per-stock level is estimated separately (above).
 
 **Components.** k was chosen on validation from {4, 16, 64}, then
 {16, 64, 256} once 64 won all 10 splits; 256 then won 8 of 10. The full
@@ -136,56 +150,63 @@ Universe (about 155k test samples per split):
 
 | predictor | QLIKE | skill vs HAR | text better in | Spearman |
 |---|---|---|---|---|
-| persistence | 0.936 ± 0.717 | −155% | — | 0.824 |
-| HAR | 0.363 ± 0.023 | 0 | 8/10 | 0.866 |
-| intensity | 0.364 ± 0.023 | −0.11% ± 0.20% | 8/10 | 0.865 |
-| shuffled | 0.365 ± 0.023 | −0.52% ± 0.40% | **10/10** | 0.864 |
-| **text** | **0.360 ± 0.023** | **+0.76% ± 1.11%** | — | 0.861 |
+| persistence | 0.936 ± 0.717 | −181% | — | 0.824 |
+| HAR | 0.343 ± 0.033 | 0 | 9/10 | 0.851 |
+| intensity | 0.344 ± 0.033 | −0.06% ± 0.17% | 9/10 | 0.851 |
+| shuffled | 0.344 ± 0.033 | −0.12% ± 0.22% | 9/10 | 0.851 |
+| **text** | **0.340 ± 0.032** | **+0.96% ± 0.69%** | — | 0.851 |
 
 TSLA (about 144 test days per split):
 
 | predictor | QLIKE | skill vs HAR | text better in |
 |---|---|---|---|
-| HAR | 0.210 ± 0.042 | 0 | 4/10 |
-| intensity | 0.210 ± 0.042 | −0.19% ± 0.60% | 4/10 |
-| shuffled | 0.209 ± 0.042 | +0.11% ± 1.17% | 4/10 |
-| text | 0.209 ± 0.043 | +0.31% ± 4.02% | — |
+| HAR | 0.200 ± 0.039 | 0 | 3/10 |
+| intensity | 0.200 ± 0.039 | −0.40% ± 0.65% | 6/10 |
+| shuffled | 0.200 ± 0.039 | −0.29% ± 0.58% | 6/10 |
+| text | 0.201 ± 0.040 | −0.56% ± 2.64% | — |
 
 What this supports, and what it does not:
 - **Across stocks, headline content improves next-week volatility
-  forecasts, by a small amount**: +0.76% QLIKE over HAR. It beats the
-  shuffled-headline control in 10/10 splits and HAR in 8/10. The controls
-  gain nothing: news volume alone is −0.11%, and shuffled content −0.52%,
-  so the gain is content, not added flexibility.
-- **It is not significant within any single split** (mean DM t −1.2 to
-  −1.7). The splits reuse the same data, so 10/10 is consistent evidence,
-  not ten independent tests.
-- **Validation overstated it.** Validation gains were 1–4%; test gives
-  0.76%, and only test is reported as the result.
-- **TSLA alone: no detectable effect** (+0.31% ± 4.02%, 4/10). An effect
-  of about 1% cannot be resolved with about 144 test days per split. The
+  forecasts, by a small amount**: +0.96% QLIKE over HAR, better in 9/10
+  splits, mean DM t −2.33 (below −2 in 6/10 splits; the splits reuse the
+  same history, so that is consistent evidence, not ten independent tests).
+- **The controls gain nothing**: news volume alone is −0.06% and shuffled
+  content −0.12% against HAR, while text beats both in 9/10 splits (mean t
+  −2.85 and −2.99). The gain is content, not added flexibility.
+- **Validation overstated it.** Validation gains were 1.5% on average
+  (10/10 splits); test gives 0.96%, and only test is reported as the result.
+- **TSLA alone: no detectable effect** (−0.56% ± 2.64%, 3/10). An effect of
+  about 1% cannot be resolved with about 144 test days per split. The
   TSLA-only fit, before pooling, was −6.7% ± 25.6%.
-- **Calibration** (pooled test, universe, predicted → realized vol by
-  decile): 21.0 → 19.8%, 41.2 → 39.0%, 67.6 → 69.3%, 136.5 → 149.3%.
+- **Calibration is close**: mean realized vol by predicted decile (pooled
+  test, universe) 20, 26, 30, 34, 39, 47, 56, 69, 92, 149% against
+  predicted 19, 25, 29, 34, 39, 46, 55, 68, 89, 154%. TSLA: predicted 45–76%
+  against realized 42–75%.
 - **HAR beats persistence in every split**; the benchmark is strong.
+
+The per-stock level mattered for the benchmark itself: fixing it took
+universe test QLIKE from 0.363 to 0.343 (−5.4%), TSLA from 0.210 to 0.200,
+and it raised text over HAR from +0.76% (8/10) to +0.96% (9/10). TSLA is the
+one place the change hurt the text arm (+0.31% → −0.56%): with a better
+benchmark there is less room for a noisy content effect at 144 days.
 
 Diagnosis of the result (test predictions, no refitting; so the test set
 has been looked at for this analysis):
-- **QLIKE is tail-dominated.** The worst 1% of samples hold 29–44% of each
-  split's HAR loss, so a split's result depends on which extreme weeks
-  land in it. This is why validation gains (1–4%) overstated test (0.76%).
-  The effective sample is far smaller than 155k.
-- **The gain is concentrated in time.** Text lowers the loss in 33 of 58
-  test months; the best 5 months give 84% of the net gain, and the worst 5
-  cancel 63%.
+- **QLIKE is tail-dominated.** The worst 1% of samples hold 26–39% of each
+  split's HAR loss, so a split's result depends on which extreme weeks land
+  in it. The effective sample is far smaller than 155k.
+- **The gain is spread over time**, unlike the previous fit: text lowers the
+  loss in 42 of 58 test months; the best 5 months give 55% of the net gain
+  and the worst 5 cancel 22% (previously 84% and 63%).
 - **The gain grows with the number of headlines** (ex ante, pooled test):
-  0 headlines −1.3%, 1 −2.5%, 2–3 +1.2%, 4–7 +3.3%, 8–15 +4.1%, 16+
-  +5.9%. Information comes from aggregating headlines. Windows with 0–1
-  headlines (45% of samples) are worse than HAR.
+  0 headlines −0.1%, 1 −0.1%, 2–3 +1.1%, 4–7 +1.8%, 8–15 +2.9%, 16+ +2.7%.
+  Information comes from aggregating headlines. Quiet windows (46% of
+  samples) are now neutral rather than losing, because the per-stock level
+  no longer has to be inferred from headline counts.
 - **Tried and rejected on validation:** empirical-Bayes shrinkage of each
-  window mean toward neutral by n/(n + σ²_w/σ²_b). It was better in only
-  3/10 splits on validation, so it was reverted without being scored on
-  test.
+  window mean toward neutral by n/(n + σ²_w/σ²_b) (better in 3/10 splits);
+  the full 768-dimension embedding (worse on test); all-MiniLM-L6-v2 as the
+  encoder (worse in 7/10 splits).
 
 ## Quick start
 

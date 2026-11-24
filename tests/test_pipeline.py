@@ -169,3 +169,45 @@ def test_fit_and_evaluate_end_to_end(world):
         assert set(r["qlike"]) == {"persistence", "HAR", "intensity", "shuffled", "text"}
         assert r["n_splits"] == 3
         assert all(np.isfinite(list(s["qlike"].values())).all() for s in r["splits"])
+
+
+def test_fixed_effects_remove_the_symbol_level():
+    """Shift y and every feature of a symbol by a constant: the fitted deviations
+    must not move, because that constant is exactly what the level absorbs."""
+    rng = np.random.default_rng(0)
+    n_sym, per = 4, 60
+    sym = np.repeat(np.arange(n_sym), per)
+    tr = np.arange(n_sym * per)
+    X = rng.normal(size=(len(sym), 2)) + rng.normal(0, 2, n_sym)[sym][:, None]
+    y = rng.normal(3, 1, n_sym)[sym] + X @ np.array([0.5, -0.3]) + rng.normal(0, 0.4, len(sym))
+
+    def fit(X, y):
+        Xd = train.centre(X.copy(), train.means(X, sym, n_sym), sym)
+        yd = y - train.levels(y, sym, tr, n_sym)[sym]
+        return train.fit_qlike(np.c_[np.ones(len(sym)), Xd], yd)
+
+    c = rng.normal(0, 3, n_sym)                     # a different constant per stock
+    assert np.allclose(fit(X, y), fit(X + c[sym][:, None], y + c[sym]), atol=1e-8)
+
+
+def test_level_is_the_qlike_optimal_location():
+    """The per-symbol level is the minimiser of the loss, not the mean of y."""
+    y = np.random.default_rng(1).normal(3, 1, 200)
+    lev = train.levels(y, np.zeros(200, int), np.arange(200), 1)[0]
+    grid = lev + np.linspace(-2, 2, 401)
+    losses = [train.qlike(np.full(200, g), y).mean() for g in grid]
+    assert np.argmin(losses) == 200                 # lev is the centre of the grid
+    assert abs(lev - y.mean()) > 0.05               # not the mean of log variance
+
+
+def test_levels_and_means_fall_back_when_a_symbol_is_absent():
+    sym = np.array([0, 0, 0, 1])
+    y = np.log(np.array([1.0, 4.0, 9.0, 100.0]))
+    X = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+    tr = np.array([0, 1, 2])                        # symbol 1 is missing from train
+    lev = train.levels(y, sym, tr, 2)
+    M = train.means(X[tr], sym[tr], 2)
+    assert np.isclose(lev[0], np.log(np.mean(np.exp(y[[0, 1, 2]]))))
+    assert np.isclose(lev[1], np.log(np.mean(np.exp(y[[0, 1, 2]]))))
+    assert np.allclose(M[0], X[[0, 1, 2]].mean(0))
+    assert np.allclose(M[1], X[[0, 1, 2]].mean(0))
