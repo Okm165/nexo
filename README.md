@@ -156,7 +156,7 @@ Universe (about 155k test samples per split):
 
 | predictor | QLIKE | skill vs HAR | text better in | Spearman |
 |---|---|---|---|---|
-| persistence | 0.936 ± 0.717 | −181% | — | 0.824 |
+| persistence | 0.501 ± 0.102 | −48.0% | — | 0.818 |
 | HAR | 0.343 ± 0.033 | 0 | 9/10 | 0.851 |
 | intensity | 0.344 ± 0.033 | −0.06% ± 0.17% | 9/10 | 0.851 |
 | shuffled | 0.344 ± 0.033 | −0.12% ± 0.22% | 9/10 | 0.851 |
@@ -166,6 +166,7 @@ TSLA (about 144 test days per split):
 
 | predictor | QLIKE | skill vs HAR | text better in |
 |---|---|---|---|
+| persistence | 0.280 ± 0.065 | −39.6% | — |
 | HAR | 0.200 ± 0.039 | 0 | 3/10 |
 | intensity | 0.200 ± 0.039 | −0.40% ± 0.65% | 6/10 |
 | shuffled | 0.200 ± 0.039 | −0.29% ± 0.58% | 6/10 |
@@ -190,7 +191,12 @@ What this supports, and what it does not:
   test, universe) 20, 26, 30, 34, 39, 47, 56, 69, 92, 149% against
   predicted 19, 25, 29, 34, 39, 46, 55, 68, 89, 154%. TSLA: predicted 45–76%
   against realized 42–75%.
-- **HAR beats persistence in every split**; the benchmark is strong.
+- **HAR beats persistence in every split** (10/10, mean t −3.22 on the
+  random splits, −5.83 on the holdout); the benchmark is strong. Persistence
+  is calibrated like every fitted arm — the previous window's deviation from
+  the stock's norm, plus the stock's level — so the comparison is fair
+  (uncalibrated, it lost by 181%, an artefact of the loss, not of the
+  forecast).
 
 The per-stock level mattered for the benchmark itself: fixing it took
 universe test QLIKE from 0.363 to 0.343 (−5.4%), TSLA from 0.210 to 0.200,
@@ -237,7 +243,7 @@ Universe (228,893 test samples) and TSLA (216 test days):
 
 | predictor | universe QLIKE | vs HAR | TSLA QLIKE | vs HAR |
 |---|---|---|---|---|
-| persistence | 0.485 | −36.4% | 0.233 | −24.3% |
+| persistence | 0.413 | −16.2% | 0.212 | −13.2% |
 | HAR | 0.356 | 0 | 0.187 | 0 |
 | intensity | 0.355 | +0.07% | 0.188 | −0.34% |
 | shuffled | 0.355 | +0.03% | 0.188 | −0.46% |

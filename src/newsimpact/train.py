@@ -69,11 +69,6 @@ def _chunks(idx: np.ndarray, size: int = CHUNK):
         yield idx[s:s + size]
 
 
-def _z(X: np.ndarray, tr: np.ndarray) -> np.ndarray:
-    mu, sd = X[tr].mean(0), X[tr].std(0)
-    return (X - mu) / np.where(sd > 0, sd, 1.0)
-
-
 def levels(y: np.ndarray, sym: np.ndarray, tr: np.ndarray, n_sym: int) -> np.ndarray:
     """log of the mean train target variance of each symbol (QLIKE-optimal location).
 
@@ -142,9 +137,12 @@ def fit_split(ds: dict, k: int, cfg: dict, E: np.ndarray,
     shuf = np.random.default_rng(k).choice(rows, len(att))
 
     one = np.ones((len(y), 1))
-    P, N = _z(ctx[:, :n_price], tr), _z(ctx[:, n_price:], tr)
-    price = np.c_[one, centre(P, means(P[tr], sym[tr], n_sym), sym)]
-    inten = np.c_[price, centre(N, means(N[tr], sym[tr], n_sym), sym)]
+    # no pooled z-score here: these columns are unpenalized, so column scaling
+    # cannot change the fit, and the per-symbol centring below is the
+    # normalization that matters
+    P, N = ctx[:, :n_price], ctx[:, n_price:]
+    price = np.c_[one, centre(P.copy(), means(P[tr], sym[tr], n_sym), sym)]
+    inten = np.c_[price, centre(N.copy(), means(N[tr], sym[tr], n_sym), sym)]
     q = inten.shape[1]
 
     def design(src):                     # [one | price dev | intensity dev | text PCs]
@@ -187,7 +185,11 @@ def fit_split(ds: dict, k: int, cfg: dict, E: np.ndarray,
         del A
         out[name] = best[3]
         sel[name] = {"val_qlike": best[0], "pcs": best[1], "ridge": best[2]}
-    out["persistence"] = ds["prev"].numpy()[te].astype(np.float64)
+    # the naive forecast, calibrated like every fitted arm: the previous
+    # window's deviation from the symbol's norm, plus the symbol's level
+    prev = ds["prev"].numpy().astype(np.float64)
+    mp = means(prev[tr, None], sym[tr], n_sym)
+    out["persistence"] = centre(prev[:, None].copy(), mp, sym)[te, 0] + level[sym[te]]
     out["val_har"] = float(qlike(predict(price[va], w_har, va), y[va]).mean())
     out["val_intensity"] = float(qlike(predict(inten[va], w_int, va), y[va]).mean())
     out["selection"] = sel
