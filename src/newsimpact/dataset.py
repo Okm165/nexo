@@ -2,31 +2,39 @@
 
 The window slides ONE session at a time. For every day t:
 
-    target  annualized realized volatility over the NEXT W sessions
-            rv = sqrt(252/W · Σ_{k=1..W} r_{t+k}²),  r = daily close-to-close log return
+    target  log annualized Yang–Zhang variance of the NEXT W sessions
+            (t+1 .. t+W), from daily open/high/low/close
     input   everything known at the close of t:
-            * the symbol's headlines from the last W sessions (the set)
-            * own log realized vol over the last 5, 22, 66 and 132 sessions
-              (week, month, quarter, half-year: short-term state plus the
-              stock's own long-run level that volatility reverts to)
-            * market log realized vol: the same four numbers averaged over
-              every symbol with a clean history that day (the vol regime)
-            * news intensity: log(1 + headline count) minus that day's average
-              over symbols — relative, so a vendor covering more news over the
-              years does not look like rising volatility
+            * the symbol's headlines from the last W sessions, each with its
+              age in sessions (possibly none — the model has a "no news" token)
+            * own log Yang–Zhang variance over the last 5, 22, 66, 132 sessions
+            * news intensity: log(1 + headlines in the window) minus
+              log(1 + the window-length share of the last 132 sessions'
+              headlines) — attention relative to the symbol's own recent norm,
+              so a vendor covering more over the years is not "more news"
+
+Yang–Zhang (2000), for the n days of a window:
+    o = ln(O_i / C_{i-1})   overnight      c = ln(C_i / O_i)   open-to-close
+    rs = u(u - c) + d(d - c),  u = ln(H_i/O_i), d = ln(L_i/O_i)   (Rogers–Satchell)
+    σ² = Var(o) + k Var(c) + (1 - k) mean(rs),  k = 0.34 / (1.34 + (n+1)/(n-1))
+Annualized ×252. Unbiased under drift and opening jumps, and several times
+more efficient than close-to-close for the same window.
 
 Point in time: a headline counts at the first close at or after its
 publication; the close is taken as 20:00 UTC (16:00 New York in summer, an
-hour early in winter, so the rule can only be conservative). Market and news
-averages use only information available at the close of t.
+hour early in winter, so the rule can only be conservative).
 
-Data hygiene, exact rules (no tuned thresholds):
-  * every session of [t-132, t+W] must be present on the market calendar for
-    the symbol (gaps from delisting / ticker reuse make "W sessions" a lie)
-  * no |log return| > 1 in that span (a >172% day is an unadjusted split)
-  * realized vols must be positive (zero means stale prices)
-Splits are purged: a sample is in a split only if t AND t+W fall inside it.
-All normalisation statistics (embeddings, inputs, target) come from train.
+Data hygiene, exact rules:
+  * a bar is valid only if 0 < low ≤ min(open, close) ≤ max(open, close) ≤ high
+  * every session of [t-132, t+W] must be present on the market calendar and
+    valid, with no |log close-to-close| > 1 (an unadjusted split)
+  * every variance used must be > 0 (zero means the price did not trade)
+  * samples start at SAMPLE_START, where the news archive's coverage begins:
+    before it an empty window means "not collected", not "no news". Earlier
+    bars still serve as price history.
+
+The dataset is split-free; `blocked_split` assigns samples (see there).
+Nothing here is fitted to data, so nothing here can leak.
 """
 from __future__ import annotations
 
@@ -40,31 +48,65 @@ import pyarrow.parquet as pq
 import torch
 
 CLOSE_UTC_HOUR = 20
-HAR = (5, 22, 66, 132)      # price lookbacks, sessions
+LOOKBACKS = (5, 22, 66, 132)        # sessions
 MAX_ABS_LOGRET = 1.0
-SPLITS = ("train", "val", "test")
-CTX = (*(f"own_rv{k}" for k in HAR), *(f"mkt_rv{k}" for k in HAR), "news_intensity")
-N_PRICE = 2 * len(HAR)      # the price columns: no news information
+CTX = (*(f"logvar{k}" for k in LOOKBACKS), "news_intensity")
+N_PRICE = len(LOOKBACKS)            # the first columns carry no news information
 
 
-def realized_vol(c2: np.ndarray, end: np.ndarray, k: int) -> np.ndarray:
-    """Annualized realized vol of the k returns ending at index `end`.
+def _windowed(x: np.ndarray, end: np.ndarray, n: int):
+    """Sum and sum of squares of x over the n entries ending at `end` (inclusive)."""
+    s1 = np.concatenate([[0.0], np.cumsum(x)])
+    s2 = np.concatenate([[0.0], np.cumsum(x * x)])
+    return s1[end + 1] - s1[end + 1 - n], s2[end + 1] - s2[end + 1 - n]
 
-    `c2` is the cumulative sum of squared log returns with c2[0] = 0, so the
-    returns r_{end-k+1} .. r_end sum to c2[end] - c2[end-k].
+
+def yang_zhang(o: np.ndarray, c: np.ndarray, rs: np.ndarray, end: np.ndarray,
+               n: int) -> np.ndarray:
+    """Annualized Yang–Zhang variance of the n days ending at index `end`."""
+    so, so2 = _windowed(o, end, n)
+    sc, sc2 = _windowed(c, end, n)
+    srs, _ = _windowed(rs, end, n)
+    # sample variances; cancellation can leave -1e-19 where the truth is 0
+    var_o = np.maximum(so2 - so * so / n, 0.0) / (n - 1)
+    var_c = np.maximum(sc2 - sc * sc / n, 0.0) / (n - 1)
+    k = 0.34 / (1.34 + (n + 1) / (n - 1))
+    return 252.0 * (var_o + k * var_c + (1 - k) * srs / n)
+
+
+def blocked_split(ds: dict, seed: int, block: int, val_frac: float,
+                  test_frac: float) -> np.ndarray:
+    """Purged blocked random split: 0 train / 1 val / 2 test / -1 dropped.
+
+    The market calendar is cut into consecutive blocks of `block` sessions,
+    and blocks — not days — are assigned to train/val/test uniformly at
+    random, so every split samples every market regime. A sample is kept only
+    if its whole span, from the first session of its headline window to the
+    last session of its target window, lies in blocks of ONE split: no target
+    session and no headline is shared across splits. (Price lookbacks reach
+    further back; they carry no target of another split.)
     """
-    return np.sqrt(252.0 / k * (c2[end] - c2[end - k]))
+    W = ds["config"]["WINDOW"]
+    pos = ds["pos"].numpy() - int(ds["pos"].min()) + W     # blocks tile the sampled span
+    n_blocks = (int(pos.max()) + W) // block + 1
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(n_blocks)
+    n_te, n_va = round(test_frac * n_blocks), round(val_frac * n_blocks)
+    assign = np.zeros(n_blocks, np.int8)
+    assign[order[:n_te]] = 2
+    assign[order[n_te:n_te + n_va]] = 1
+    first, last = assign[(pos - W + 1) // block], assign[(pos + W) // block]
+    return np.where(first == last, assign[pos // block], -1).astype(np.int8)
 
 
 def _bars(path: str):
-    t = pq.read_table(path, columns=["symbol", "day", "close"])
+    t = pq.read_table(path, columns=["symbol", "day", "open", "high", "low", "close"])
     sym = np.asarray(t["symbol"].to_pylist())
     day = t["day"].cast(pa.date32()).to_numpy().astype("datetime64[D]").astype(np.int64)
-    close = t["close"].to_numpy(zero_copy_only=False).astype(np.float64)
-    ok = np.isfinite(close) & (close > 0)
-    sym, day, close = sym[ok], day[ok], close[ok]
+    ohlc = np.stack([t[k].to_numpy(zero_copy_only=False).astype(np.float64)
+                     for k in ("open", "high", "low", "close")], 1)
     order = np.lexsort((day, sym))
-    return sym[order], day[order], close[order]
+    return sym[order], day[order], ohlc[order]
 
 
 def _embeddings(prefix: str):
@@ -104,24 +146,19 @@ def _attachments(cfg: dict, code: dict):
 
 def build(cfg: dict) -> dict:
     W = int(cfg["WINDOW"])
-    L = max(HAR)
-    train_end = np.datetime64(cfg["TRAIN_END"]).astype(np.int64)
-    val_end = np.datetime64(cfg["VAL_END"]).astype(np.int64)
-
-    sym, day, close = _bars(cfg["BARS_PATH"])
+    L = max(LOOKBACKS)
+    first_day = np.datetime64(cfg["SAMPLE_START"]).astype(np.int64)
+    sym, day, ohlc = _bars(cfg["BARS_PATH"])
     calendar = np.unique(day)
     symbols, sym_start = np.unique(sym, return_index=True)
     bounds = [*sym_start, len(sym)]
     E, a_sym, a_pub, a_emb = _attachments(cfg, {s: i for i, s in enumerate(symbols)})
     a_bounds = np.searchsorted(a_sym, np.arange(len(symbols) + 1))
 
-    # pass 1: per symbol, every day with a clean price history (market inputs),
-    # and the subset that is a sample (news in window, clean target window)
-    hist_day, hist_own = [], []
-    cols = {k: [] for k in ("sym", "t", "day", "lo", "hi", "own", "y", "prev", "split")}
-    att_emb, att_info, att_day, n_att = [], [], [], 0
+    cols = {k: [] for k in ("sym", "t", "pos", "day", "lo", "hi", "own", "news", "y", "prev")}
+    att_emb, att_info, n_att = [], [], 0
     for c in range(len(symbols)):
-        d, px = day[bounds[c]:bounds[c + 1]], close[bounds[c]:bounds[c + 1]]
+        d, bars = day[bounds[c]:bounds[c + 1]], ohlc[bounds[c]:bounds[c + 1]]
         n = len(d)
         info = np.searchsorted(d * 86400 + CLOSE_UTC_HOUR * 3600,
                                a_pub[a_bounds[c]:a_bounds[c + 1]], side="left")
@@ -129,82 +166,61 @@ def build(cfg: dict) -> dict:
         info = info[keep]
         att_emb.append(a_emb[a_bounds[c]:a_bounds[c + 1]][keep])
         att_info.append(info)
-        att_day.append(d[info])
 
-        r = np.diff(np.log(px))                        # r[i-1] = ln(c_i / c_{i-1})
-        c2 = np.concatenate([[0.0], np.cumsum(r ** 2)])
-        bad = np.concatenate([[0], np.cumsum(np.abs(r) > MAX_ABS_LOGRET)])
-        pos = np.searchsorted(calendar, d)             # position on the market calendar
-        t = np.arange(L, n)
-        own = np.stack([realized_vol(c2, t, k) for k in HAR], 1)
-        hist_ok = ((bad[t] - bad[t - L] == 0) & (pos[t] - pos[t - L] == L)
-                   & (own > 0).all(1))
-        hist_day.append(d[t][hist_ok])
-        hist_own.append(np.log(own[hist_ok]))
+        p_open, p_high, p_low, p_close = bars.T
+        valid = ((p_low > 0) & (p_low <= np.minimum(p_open, p_close))
+                 & (np.maximum(p_open, p_close) <= p_high))
+        # logs of valid bars only (invalid ones are excluded below via `bad`)
+        lo_, lh, ll, logc = np.log(np.where(valid[:, None], bars, 1.0)).T
+        o = np.concatenate([[0.0], lo_[1:] - logc[:-1]])   # overnight; day 0 has none
+        cc, u, dn = logc - lo_, lh - lo_, ll - lo_
+        rs = u * (u - cc) + dn * (dn - cc)                 # Rogers–Satchell, ≥ 0
+        ok_day = valid.copy()
+        ok_day[0] = False
+        ok_day[1:] &= valid[:-1] & (np.abs(np.diff(logc)) <= MAX_ABS_LOGRET)
+        bad = np.concatenate([[0], np.cumsum(~ok_day)])
+        pos = np.searchsorted(calendar, d)
 
-        t = t[t + W < n]
+        t = np.arange(L, n - W)
         if len(t) == 0:
             n_att += len(info)
             continue
-        own = own[: len(t)]
+        clean = (bad[t + W + 1] - bad[t - L + 1] == 0) & (pos[t + W] - pos[t - L] == L + W)
+        own = np.stack([yang_zhang(o, cc, rs, t, k) for k in LOOKBACKS], 1)
+        y = yang_zhang(o, cc, rs, t + W, W)
+        prev = yang_zhang(o, cc, rs, t, W)
+        daily = np.bincount(info, minlength=n).astype(np.float64)
+        cum = np.concatenate([[0.0], np.cumsum(daily)])
+        n_win = cum[t + 1] - cum[t + 1 - W]
+        base = (cum[t + 1] - cum[t + 1 - L]) * W / L
+        m = clean & (own > 0).all(1) & (y > 0) & (prev > 0) & (d[t] >= first_day)
         lo = np.searchsorted(info, t - W + 1, side="left")
         hi = np.searchsorted(info, t, side="right")
-        y = realized_vol(c2, t + W, W)
-        prev = realized_vol(c2, t, W)
-        split = np.full(len(t), -1, np.int8)
-        split[d[t + W] <= train_end] = 0
-        split[(d[t] > train_end) & (d[t + W] <= val_end)] = 1
-        split[d[t] > val_end] = 2
-        m = (hist_ok[: len(t)] & (bad[t + W] - bad[t] == 0) & (pos[t + W] - pos[t] == W)
-             & (y > 0) & (prev > 0) & (hi > lo) & (split >= 0))
-        for k, v in (("sym", np.full(len(t), c, np.int32)), ("t", t), ("day", d[t]),
-                     ("lo", lo + n_att), ("hi", hi + n_att), ("split", split)):
+        for k, v in (("sym", np.full(len(t), c, np.int32)), ("t", t), ("pos", pos[t]),
+                     ("day", d[t]), ("lo", lo + n_att), ("hi", hi + n_att),
+                     ("news", np.log1p(n_win) - np.log1p(base))):
             cols[k].append(v[m])
         for k, v in (("own", own), ("y", y), ("prev", prev)):       # positive after masking
             cols[k].append(np.log(v[m]))
         n_att += len(info)
 
     s = {k: np.concatenate(v) for k, v in cols.items()}
-    for i, name in enumerate(SPLITS):
-        if not (s["split"] == i).any():
-            raise ValueError(f"empty {name} split — check TRAIN_END/VAL_END against the data")
-
-    # market regime: same-day mean over every symbol with a clean history
-    hd, ho = np.concatenate(hist_day), np.concatenate(hist_own)
-    mdays, inv = np.unique(hd, return_inverse=True)
-    mkt = np.stack([np.bincount(inv, ho[:, j]) / np.bincount(inv) for j in range(len(HAR))], 1)
-    mkt = mkt[np.searchsorted(mdays, s["day"])]
-    # news intensity: count relative to the same day's cross-section of samples
-    lc = np.log1p(s["hi"] - s["lo"])
-    _, dinv = np.unique(s["day"], return_inverse=True)
-    lc = lc - (np.bincount(dinv, lc) / np.bincount(dinv))[dinv]
-    s["ctx"] = np.c_[s.pop("own"), mkt, lc].astype(np.float32)
+    if not len(s["y"]):
+        raise ValueError("no samples — check BARS_PATH coverage against the lookbacks")
+    s["ctx"] = np.c_[s.pop("own"), s.pop("news")].astype(np.float32)
     s["y"], s["prev"] = s["y"].astype(np.float32), s["prev"].astype(np.float32)
 
-    att_emb, att_info, att_day = map(np.concatenate, (att_emb, att_info, att_day))
+    att_emb, att_info = map(np.concatenate, (att_emb, att_info))
     used, att_emb = np.unique(att_emb, return_inverse=True)
-    E = E[used]
-    # embeddings: standardise every dimension with train-period statistics.
-    # Raw mean-pooled vectors share one dominant direction (mean cosine ~0.9
-    # between random headlines); without this the content is a small residue.
-    tr_rows = np.unique(att_emb[att_day <= train_end])
-    mu, sd = E[tr_rows].mean(0), E[tr_rows].std(0) + 1e-6
-    E = ((E - mu) / sd).astype(np.float16)
-    # shuffled-text control: each attachment gets a random train-period
-    # headline (fixed seed), keeping count and age — only content changes
-    att_shuf = np.random.default_rng(0).choice(att_emb[att_day <= train_end], len(att_emb))
-
-    te = s["split"] == 2
     digest = hashlib.md5(np.concatenate(
-        [s["sym"][te], s["t"][te], s["y"][te].view(np.int32)]).tobytes()).hexdigest()[:12]
+        [s["sym"], s["t"], s["y"].view(np.int32)]).tobytes()).hexdigest()[:12]
     ds = {
-        "config": {"WINDOW": W, "TRAIN_END": cfg["TRAIN_END"], "VAL_END": cfg["VAL_END"],
-                   "HAR": list(HAR), "ctx": list(CTX), "n_price": N_PRICE,
-                   "close_utc_hour": CLOSE_UTC_HOUR},
+        "config": {"WINDOW": W, "SAMPLE_START": cfg["SAMPLE_START"],
+                   "LOOKBACKS": list(LOOKBACKS), "ctx": list(CTX),
+                   "n_price": N_PRICE, "close_utc_hour": CLOSE_UTC_HOUR},
         "digest": digest, "symbols": list(symbols),
-        "emb": torch.from_numpy(E),
+        "emb": torch.from_numpy(E[used]),                       # raw float32
         "att_emb": torch.from_numpy(att_emb.astype(np.int64)),
-        "att_shuf": torch.from_numpy(att_shuf.astype(np.int64)),
         "att_info": torch.from_numpy(att_info.astype(np.int64)),
         **{k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in s.items()},
     }
@@ -219,20 +235,18 @@ def build(cfg: dict) -> dict:
 
 def _summary(ds: dict) -> None:
     n = (ds["hi"] - ds["lo"]).numpy()
-    for i, name in enumerate(SPLITS):
-        m = ds["split"].numpy() == i
-        vol = np.exp(ds["y"].numpy()[m]) * 100
-        d = ds["day"].numpy()[m].astype("datetime64[D]")
-        print(f"{name:5s} {m.sum():>8,} samples  {d.min()}..{d.max()}  "
-              f"headlines/sample p50={np.median(n[m]):.0f} p95={np.percentile(n[m], 95):.0f}  "
-              f"next-window vol p50={np.median(vol):.1f}%")
-    print(f"{len(ds['emb']):,} headlines, {len(ds['att_emb']):,} symbol attachments, "
+    d = ds["day"].numpy().astype("datetime64[D]")
+    vol = np.sqrt(np.exp(ds["y"].numpy())) * 100
+    print(f"{len(n):,} samples  {d.min()}..{d.max()}  headlines/window "
+          f"p50={np.median(n):.0f} p95={np.percentile(n, 95):.0f} none={np.mean(n == 0):.1%}  "
+          f"next-window vol p50={np.median(vol):.1f}%")
+    print(f"{len(ds['emb']):,} headlines, {len(ds['att_emb']):,} attachments, "
           f"digest {ds['digest']}")
 
 
 def load(path: str) -> dict:
     ds = torch.load(path, weights_only=False, map_location="cpu")
-    for k in ("emb", "att_emb", "att_shuf", "att_info", "lo", "hi", "t", "ctx", "y", "split"):
+    for k in ("emb", "att_emb", "att_info", "lo", "hi", "t", "pos", "day", "ctx", "y", "prev"):
         if k not in ds:
             raise ValueError(f"{path}: missing {k} — rebuild with `newsimpact build`")
     if not torch.isfinite(ds["y"]).all() or not torch.isfinite(ds["ctx"]).all():
