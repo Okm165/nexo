@@ -128,7 +128,12 @@ def _bars(path: str):
     ohlc = np.stack([t[k].to_numpy(zero_copy_only=False).astype(np.float64)
                      for k in ("open", "high", "low", "close")], 1)
     order = np.lexsort((day, sym))
-    return sym[order], day[order], ohlc[order]
+    sym, day, ohlc = sym[order], day[order], ohlc[order]
+    # sorted by (symbol, day), so a duplicate session is adjacent; a repeated
+    # bar would silently corrupt every windowed sum downstream
+    if len(sym) > 1 and np.any((sym[1:] == sym[:-1]) & (day[1:] == day[:-1])):
+        raise ValueError("bars: duplicate (symbol, day) rows — deduplicate the source")
+    return sym, day, ohlc
 
 
 def _embeddings(prefix: str):

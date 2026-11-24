@@ -173,6 +173,15 @@ def test_fit_and_evaluate_end_to_end(world):
         assert all(np.isfinite(list(s["qlike"].values())).all() for s in r["splits"])
 
 
+def test_build_refuses_duplicate_bars(world):
+    """A repeated (symbol, day) row would corrupt every windowed sum: refused."""
+    cfg, _, _, _, _ = world
+    t = pq.read_table(cfg["BARS_PATH"])
+    pq.write_table(pa.concat_tables([t, t.slice(0, 1)]), cfg["BARS_PATH"] + ".dup")
+    with pytest.raises(ValueError, match="duplicate"):
+        dataset.build(cfg | {"BARS_PATH": cfg["BARS_PATH"] + ".dup"})
+
+
 def test_forecast_writes_one_row_per_symbol(world):
     """The deliverable: one predicted vol per symbol as of its last session,
     positive and finite, sorted worst-first in the CSV."""
