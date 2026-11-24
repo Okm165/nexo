@@ -12,3 +12,4 @@ fi
 $NI build
 $NI train
 $NI evaluate
+$NI forecast
