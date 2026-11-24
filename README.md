@@ -260,6 +260,16 @@ inside that year (better in 10 of 11 months, only 3% of the loss in the worst
 it is one dense-news year of one stock — a different regime from the rest of
 the sample, not a replicated finding.
 
+**Why it fails: the 2026 text inputs are out of distribution.** Window-mean
+PC scores are standardized with train moments, so a drift shows up as a mean
+shift. On the random splits the test means sit within 0.1–0.3 window-sd of
+the train mean; in 2026 they are 2–3× further (PC6 at −0.61 window-sd), while
+the scale is unchanged (sd ratio ≈ 1) and 99.4% of test symbols have train
+samples. The archive's headline coverage grew about 35% over the sample, so
+the 2026 headlines themselves are a different distribution from the ones the
+text coefficients were estimated on. Measured, not corrected: any correction
+fitted on 2026 would consume the holdout.
+
 What this means for the project: the pipeline, the per-stock level and the
 HAR/QLIKE evaluation stand, and the forward split is now part of the method.
 The claim that headline text adds forecasting power does not stand.
