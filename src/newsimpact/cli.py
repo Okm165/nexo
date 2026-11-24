@@ -17,6 +17,7 @@ def main() -> None:
     sub.add_parser("build", help="sliding-window samples, inputs and targets")
     sub.add_parser("train", help="fit every arm on every random split")
     sub.add_parser("holdout", help="one time-ordered split: unread test period")
+    sub.add_parser("forecast", help="fit on all data, predict the next window per symbol")
     sub.add_parser("evaluate", help="score all splits vs HAR and persistence")
     a = p.parse_args()
     cfg = load_env()
@@ -39,6 +40,9 @@ def main() -> None:
     elif a.cmd == "holdout":
         from newsimpact.train import run_holdout
         run_holdout(cfg)
+    elif a.cmd == "forecast":
+        from newsimpact.train import forecast
+        forecast(cfg)
     else:
         from newsimpact.evaluate import main as evaluate
         evaluate(cfg)

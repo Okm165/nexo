@@ -280,6 +280,29 @@ What this means for the project: the pipeline, the per-stock level and the
 HAR/QLIKE evaluation stand, and the forward split is now part of the method.
 The claim that headline text adds forecasting power does not stand.
 
+## Forecast (the deliverable)
+
+`newsimpact forecast` fits the model once on **every** sample with the (k, λ)
+the random splits' validation chose (the mode over splits, ties by the better
+mean validation QLIKE — no re-tuning), and predicts the next-`WINDOW`-session
+volatility for every symbol as of that symbol's last session, using only what
+is known at that close. Output is `STATE_DIR/forecast.csv`:
+
+```
+symbol,day,predicted_vol_pct,previous_window_vol_pct
+SMX,2026-11-16,705.56,805.93
+PARA,2026-10-27,474.09,356.89
+...
+TSLA,2026-11-16,54.65,41.11
+```
+
+1,158 symbols, sessions 2021-01-04..2026-11-16 (a symbol's last session is
+its own — delisted symbols stop earlier). Universe median predicted vol
+46.0%. Caveats carried over from the evaluation: the model is honest about
+level (calibration is close), and the text features add no established edge
+(holdout section below), so treat the text terms as a small, unproven
+adjustment on top of a well-calibrated price-and-intensity forecast.
+
 ## Quick start
 
 ```bash
@@ -290,6 +313,7 @@ uv run newsimpact fetch-news        # only if you have no longer archive
 scripts/run.sh                      # embed → build → train → evaluate
 STATE_DIR=state/holdout uv run newsimpact holdout   # one forward-in-time split
 STATE_DIR=state/holdout uv run newsimpact evaluate  # score it (test used once)
+uv run newsimpact forecast          # the deliverable: state/forecast.csv
 ```
 
 Artifacts go to `STATE_DIR` (default `./state`): `dataset.pt`,

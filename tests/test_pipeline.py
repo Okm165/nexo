@@ -2,6 +2,7 @@
 point in time, one-day slide, the Yang–Zhang target by hand, leak-free
 blocked splits, exact data-hygiene rules, train-only control content."""
 import datetime as dt
+import pathlib
 
 import numpy as np
 import pyarrow as pa
@@ -170,6 +171,20 @@ def test_fit_and_evaluate_end_to_end(world):
         assert set(r["qlike"]) == {"persistence", "HAR", "intensity", "shuffled", "text"}
         assert r["n_splits"] == 3
         assert all(np.isfinite(list(s["qlike"].values())).all() for s in r["splits"])
+
+
+def test_forecast_writes_one_row_per_symbol(world):
+    """The deliverable: one predicted vol per symbol as of its last session,
+    positive and finite, sorted worst-first in the CSV."""
+    cfg, ds, _, _, _ = world
+    out = train.forecast(cfg)
+    assert set(out["symbols"]) == {"AAA", "BBB"}
+    assert all(np.isfinite(out["vol"])) and all(v > 0 for v in out["vol"])
+    lines = (pathlib.Path(cfg["STATE_DIR"]) / "forecast.csv").read_text().splitlines()
+    assert lines[0] == "symbol,day,predicted_vol_pct,previous_window_vol_pct"
+    assert len(lines) == len(ds["symbols"]) + 1
+    vols = [float(row.split(",")[2]) for row in lines[1:]]
+    assert vols == sorted(vols, reverse=True)
 
 
 def test_fixed_effects_remove_the_symbol_level():

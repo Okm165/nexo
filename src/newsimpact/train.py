@@ -235,3 +235,94 @@ def run_holdout(cfg: dict) -> None:
     print(f"holdout: train {int((split == 0).sum()):,}  val {int((split == 1).sum()):,}  "
           f"test {int((split == 2).sum()):,} samples", flush=True)
     _save(fit_split(ds, 0, cfg, ds["emb"].numpy(), split=split), out, ds["digest"])
+
+
+def _hyper(cfg: dict, digest: str) -> tuple[int, float]:
+    """(k, λ) the random splits' validation chose: the mode over splits, ties
+    broken by the better mean validation QLIKE. An exact rule — the forecast
+    model is the one that was scored, not a re-tuned one."""
+    runs = sorted((Path(cfg["STATE_DIR"]) / "runs").glob("split*.json"))
+    if not runs:
+        raise SystemExit("no fitted splits — run `newsimpact train` first")
+    votes = {}
+    for f in runs:
+        meta = json.loads(f.read_text())
+        if meta["digest"] != digest:
+            raise SystemExit(f"{f}: fitted on a different dataset — rerun `newsimpact train`")
+        q = meta["selection"]["text"]
+        votes.setdefault((q["pcs"], q["ridge"]), []).append(q["val_qlike"])
+    return min(votes.items(), key=lambda kv: (-len(kv[1]), np.mean(kv[1])))[0]
+
+
+def _text_features(ds: dict, E: np.ndarray, npc: int, sym: np.ndarray,
+                   n_sym: int) -> np.ndarray:
+    """The text features of `fit_split`, with every sample as train: PCs of the
+    headlines' correlation matrix, window means standardized, centred per
+    symbol, empty windows at the neutral 0 before centring."""
+    lo, hi, att = ds["lo"].numpy(), ds["hi"].numpy(), ds["att_emb"].numpy()
+    X = E.astype(np.float64)
+    s1, s2 = np.zeros(X.shape[1]), np.zeros((X.shape[1], X.shape[1]))
+    for c in _chunks(np.arange(len(X))):
+        Xc = X[c]
+        s1 += Xc.sum(0)
+        s2 += Xc.T @ Xc
+    mu, cov = s1 / len(X), s2 / len(X) - np.outer(s1 / len(X), s1 / len(X))
+    sd = np.sqrt(np.maximum(np.diag(cov), 0)) + 1e-6
+    corr = cov / np.outer(sd, sd)
+    V = np.linalg.eigh(corr)[1][:, ::-1][:, :npc]
+    scores = np.concatenate([((X[c] - mu) / sd) @ V for c in _chunks(np.arange(len(X)))])
+    T = window_means(ds, scores[att])
+    mu_t, sd_t = T.mean(0), T.std(0)
+    T = (T - mu_t) / np.where(sd_t > 0, sd_t, 1.0)
+    T[hi == lo] = 0.0
+    return centre(T, means(T, sym, n_sym), sym)
+
+
+def forecast(cfg: dict) -> dict:
+    """The deliverable: the next-WINDOW volatility of every symbol, as of each
+    symbol's last session, from the same model `evaluate` scored.
+
+    One fit on every sample with the (k, λ) the random splits' validation
+    chose — no re-tuning, no new statistic. Writes forecast.csv (symbol, day,
+    predicted annualized vol %) sorted by predicted vol, and reports TARGET.
+    """
+    ds = load(cfg["DATASET"])
+    k, lam = _hyper(cfg, ds["digest"])
+    sym = ds["sym"].numpy()
+    y = ds["y"].numpy().astype(np.float64)
+    ctx = ds["ctx"].numpy().astype(np.float64)
+    n_sym, n_price = len(ds["symbols"]), ds["config"]["n_price"]
+    W = int(ds["config"]["WINDOW"])
+    level = levels(y, sym, np.arange(len(y)), n_sym)
+    yd = y - level[sym]
+
+    P, N = ctx[:, :n_price], ctx[:, n_price:]
+    A = np.empty((len(y), 1 + n_price + N.shape[1] + k))
+    A[:, 0] = 1.0
+    A[:, 1:1 + n_price] = centre(P.copy(), means(P, sym, n_sym), sym)
+    a = 1 + n_price
+    A[:, a:a + N.shape[1]] = centre(N.copy(), means(N, sym, n_sym), sym)
+    A[:, a + N.shape[1]:] = _text_features(ds, ds["emb"].numpy(), k, sym, n_sym)
+    pen = np.r_[np.zeros(A.shape[1] - k), np.full(k, lam)]
+    w = fit_qlike(A, yd, pen)
+
+    last = np.zeros(n_sym, np.int64)                # each symbol's latest sample
+    np.maximum.at(last, sym, np.arange(len(y)))
+    h = A[last] @ w + level[np.arange(n_sym)]
+    vol = np.sqrt(np.exp(h)) * 100
+    prev = np.sqrt(np.exp(ds["prev"].numpy()[last].astype(np.float64))) * 100
+    day = ds["day"].numpy()[last].astype("datetime64[D]")
+    out = Path(cfg["STATE_DIR"]) / "forecast.csv"
+    with out.open("w") as f:
+        f.write("symbol,day,predicted_vol_pct,previous_window_vol_pct\n")
+        for i in np.argsort(-vol):
+            f.write(f"{ds['symbols'][i]},{day[i]},{vol[i]:.2f},{prev[i]:.2f}\n")
+    print(f"forecast -> {out}  ({n_sym} symbols, sessions {day.min()}..{day.max()}, "
+          f"k={k}, λ={lam:g})", flush=True)
+    if cfg["TARGET"] in ds["symbols"]:
+        t = ds["symbols"].index(cfg["TARGET"])
+        print(f"  {cfg['TARGET']}: predicted next-{W}-session vol {vol[t]:.2f}% "
+              f"(previous window {prev[t]:.2f}%)", flush=True)
+    print(f"  universe: median predicted vol {np.median(vol):.2f}%, "
+          f"max {ds['symbols'][int(np.argmax(vol))]} {vol.max():.2f}%", flush=True)
+    return {"symbols": list(ds["symbols"]), "vol": vol.tolist(), "day": day.tolist()}
