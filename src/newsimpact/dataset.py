@@ -168,6 +168,20 @@ def _attachments(cfg: dict, code: dict):
     return E, a_sym[order], a_pub[order], a_emb[order]
 
 
+def _digest(arrays: list[np.ndarray]) -> str:
+    """md5 over every input array (shape + bytes, hashed in 64 MB chunks): any
+    change to any input that training or evaluation reads changes the digest,
+    so stale runs are refused instead of silently mixed with new data."""
+    h = hashlib.md5()
+    for a in arrays:
+        a = np.ascontiguousarray(a)
+        h.update(np.array(a.shape, dtype=np.int64).tobytes())
+        b = a.ravel().view(np.uint8)
+        for c in range(0, len(b), 1 << 26):
+            h.update(b[c:c + (1 << 26)])
+    return h.hexdigest()[:12]
+
+
 def build(cfg: dict) -> dict:
     W = int(cfg["WINDOW"])
     L = max(LOOKBACKS)
@@ -236,8 +250,8 @@ def build(cfg: dict) -> dict:
 
     att_emb, att_info = map(np.concatenate, (att_emb, att_info))
     used, att_emb = np.unique(att_emb, return_inverse=True)
-    digest = hashlib.md5(np.concatenate(
-        [s["sym"], s["t"], s["y"].view(np.int32)]).tobytes()).hexdigest()[:12]
+    digest = _digest([s["sym"], s["t"], s["pos"], s["day"], s["lo"], s["hi"],
+                      s["y"], s["prev"], s["ctx"], att_emb, att_info, E])
     ds = {
         "config": {"WINDOW": W, "SAMPLE_START": cfg["SAMPLE_START"],
                    "LOOKBACKS": list(LOOKBACKS), "ctx": list(CTX),

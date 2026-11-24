@@ -138,6 +138,10 @@ shows that effect does not replicate out of sample.
 - **Repeated.** `SPLITS` = 10 independent random assignments. Results are
   mean ± sd across splits plus the number of splits each comparison wins, so
   no conclusion rests on one draw of test months.
+- **Dataset digest.** The build stamps an md5 over **every** array it
+  stores (features, targets, attachments, embeddings — shape and bytes), and
+  `evaluate` refuses runs fitted on a different digest, so a silently changed
+  input can never be mixed with old results.
 - **Train-only statistics.** Feature scaling, embedding standardization,
   principal components, the shuffled-headline pool and every coefficient
   come from the split's train data. Validation picks k and λ; test is

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
+from newsimpact import dataset
 from newsimpact.metrics import diebold_mariano, spearman
 from newsimpact.model import fit_qlike, qlike
 
@@ -57,3 +58,13 @@ def test_readme_states_the_configured_design():
     for line in (ROOT / ".env.train").read_text().splitlines():
         if line.startswith(("WINDOW=", "SAMPLE_START=", "BLOCK=")):
             assert line.split("=")[1] in readme, f"README out of sync with {line}"
+
+
+def test_digest_covers_every_input():
+    a = np.arange(12, dtype=np.float32).reshape(3, 4)
+    assert dataset._digest([a]) == dataset._digest([a.copy()])     # stable
+    b = a.copy()
+    b[1, 1] += np.float32(1)
+    assert dataset._digest([b]) != dataset._digest([a])            # value change
+    assert dataset._digest([a, a]) != dataset._digest([a])         # count
+    assert dataset._digest([a.reshape(4, 3)]) != dataset._digest([a])  # shape
