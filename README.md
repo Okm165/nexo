@@ -112,8 +112,9 @@ embedding was tried as well, with grid {64, 256, 768}, and validation chose
 −0.52% to −0.78%, which is overfitting. The shipped grid is back to
 {16, 64, 256}. That revert was informed by test, so treat the +0.76% below
 as slightly optimistic; the protocol-clean figure for the larger grid is
-+0.46%. Both say the same thing: a content effect of about +0.5–0.8%, and
-extra capacity does not raise it.
++0.46%. On the random splits both say the same thing: a content effect of
+about +0.5–0.8%, and extra capacity does not raise it. The forward holdout
+shows that effect does not replicate out of sample.
 
 ## Controls and benchmarks
 
@@ -143,6 +144,11 @@ extra capacity does not raise it.
   predicted once.
 - **Diebold–Mariano tests on QLIKE** for every split. The Newey–West
   variance uses lag W−1, counted only within contiguous test blocks.
+- **A forward holdout.** Because the random splits reuse the same history
+  (and their test months were read during development), the honest check is
+  a single time-ordered split: train < 2025, validation 2025, test 2026,
+  scored once with the design frozen (`newsimpact holdout`). It is the
+  reason the content claim below is stated as unsupported.
 
 ## Results — pooled fit, next-5-session vol, 10 random purged block splits
 
@@ -166,10 +172,12 @@ TSLA (about 144 test days per split):
 | text | 0.201 ± 0.040 | −0.56% ± 2.64% | — |
 
 What this supports, and what it does not:
-- **Across stocks, headline content improves next-week volatility
-  forecasts, by a small amount**: +0.96% QLIKE over HAR, better in 9/10
+- **On these random splits, headline content improves next-week volatility
+  forecasts by a small amount**: +0.96% QLIKE over HAR, better in 9/10
   splits, mean DM t −2.33 (below −2 in 6/10 splits; the splits reuse the
   same history, so that is consistent evidence, not ten independent tests).
+  **This is the number the forward holdout below contradicts** — read that
+  section before believing this one.
 - **The controls gain nothing**: news volume alone is −0.06% and shuffled
   content −0.12% against HAR, while text beats both in 9/10 splits (mean t
   −2.85 and −2.99). The gain is content, not added flexibility.
@@ -207,6 +215,54 @@ has been looked at for this analysis):
   window mean toward neutral by n/(n + σ²_w/σ²_b) (better in 3/10 splits);
   the full 768-dimension embedding (worse on test); all-MiniLM-L6-v2 as the
   encoder (worse in 7/10 splits).
+- **None of this survives the forward holdout.** In 2026 the same model is
+  worse than HAR across the universe and the headline-count pattern reverses,
+  so these regularities describe the random splits, not the signal.
+
+## Forward holdout — 2026, never used for any decision
+
+The random splits reuse the same 2021–2026 history, and their test months had
+been read several times during the work above. A single forward-in-time split
+is the one clean check available: train on everything before 2025, validation
+on 2025, and the test period is **2026-01-01 to 2026-11-16**, predicted once.
+The purge rule is the same as for the random splits (each sample's whole span
+lies in one segment, giving at least `WINDOW` sessions of gap at each
+boundary):
+
+```
+holdout: train 1,080,382   val 262,770   test 228,893 samples
+```
+
+Universe (228,893 test samples) and TSLA (216 test days):
+
+| predictor | universe QLIKE | vs HAR | TSLA QLIKE | vs HAR |
+|---|---|---|---|---|
+| persistence | 0.485 | −36.4% | 0.233 | −24.3% |
+| HAR | 0.356 | 0 | 0.187 | 0 |
+| intensity | 0.355 | +0.07% | 0.188 | −0.34% |
+| shuffled | 0.355 | +0.03% | 0.188 | −0.46% |
+| text | 0.358 | **−0.75%** (t = +1.41) | 0.172 | **+8.32%** (t = −4.57) |
+
+**The universe gain does not replicate.** The random splits said +
+0.96%; the untouched 2026 period says −0.75%, and text beats HAR in only
+2 of its 11 months. Worse, the pattern reverses: in 2026 the text model loses
+most where headlines are dense (8–15 headlines −2.0%, 16+ −1.1%), while
+0–1-headline windows are neutral — the opposite of the random-split pattern.
+So the +0.96% was an artefact of months that had been seen during
+development, and **headline content is not established to improve universe
+volatility forecasts**. The model still forecasts well: HAR beats persistence
+by 36% with t = −7.3, and the per-stock level is what makes it competitive.
+
+**TSLA's +8.32% is not evidence of an effect either.** It is consistent
+inside that year (better in 10 of 11 months, only 3% of the loss in the worst
+1% of days) but it contradicts the random-split estimate for the same stock
+(−0.56%, 3/10 splits), and 97% of TSLA's 2026 windows carry 16+ headlines, so
+it is one dense-news year of one stock — a different regime from the rest of
+the sample, not a replicated finding.
+
+What this means for the project: the pipeline, the per-stock level and the
+HAR/QLIKE evaluation stand, and the forward split is now part of the method.
+The claim that headline text adds forecasting power does not stand.
 
 ## Quick start
 
@@ -216,6 +272,8 @@ uv run pytest -q                    # includes a synthetic end-to-end run
 uv run newsimpact fetch-bars        # optional Alpaca adapter (keys in .env)
 uv run newsimpact fetch-news        # only if you have no longer archive
 scripts/run.sh                      # embed → build → train → evaluate
+STATE_DIR=state/holdout uv run newsimpact holdout   # one forward-in-time split
+STATE_DIR=state/holdout uv run newsimpact evaluate  # score it (test used once)
 ```
 
 Artifacts go to `STATE_DIR` (default `./state`): `dataset.pt`,
@@ -227,7 +285,8 @@ and λ) and `eval.json`.
 `.env.data` holds `SYMBOLS` (a comma list, or `@file` with one symbol per
 line, e.g. `@data/input/symbols.txt`), `START` and the paths; `.env.train` holds
 `WINDOW` (5), `SAMPLE_START` (2021-01-01), `BLOCK` (21), `VAL_FRACTION` /
-`TEST_FRACTION` (0.15), `SPLITS` (10) and `TARGET` (TSLA). `.env` holds credentials, needed
+`TEST_FRACTION` (0.15), `SPLITS` (10), `TARGET` (TSLA) and the holdout
+boundaries `VAL_START` (2025-01-01) / `TEST_START` (2026-01-01). `.env` holds credentials, needed
 only by the fetchers. The OS environment overrides any key. Paths are
 repo-relative and inputs are plain parquet, so any source with the same
 columns works.

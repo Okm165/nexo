@@ -99,6 +99,28 @@ def blocked_split(ds: dict, seed: int, block: int, val_frac: float,
     return np.where(first == last, assign[pos // block], -1).astype(np.int8)
 
 
+def time_split(ds: dict, cfg: dict) -> np.ndarray:
+    """Time-ordered split: 0 train < VAL_START ≤ 1 validation < TEST_START ≤ 2 test.
+
+    Purged exactly as `blocked_split` purges: a sample is kept only if its
+    whole span, from the first session of its headline window to the last
+    session of its target window, lies in one segment. So no train sample's
+    target reaches the test period and no test sample's headlines reach the
+    training period — at least W sessions of gap on each side. Unlike the
+    random splits, this one is a single forward-in-time draw, so it can be
+    read once as a clean check on the repeated random splits.
+    """
+    W = int(ds["config"]["WINDOW"])
+    day = pq.read_table(cfg["BARS_PATH"], columns=["day"])["day"]
+    cal = np.unique(day.cast(pa.date32()).to_numpy().astype("datetime64[D]").astype(np.int64))
+    val_start = np.datetime64(cfg["VAL_START"]).astype(np.int64)
+    test_start = np.datetime64(cfg["TEST_START"]).astype(np.int64)
+    seg = np.where(cal < val_start, 0, np.where(cal < test_start, 1, 2)).astype(np.int8)
+    pos = ds["pos"].numpy()
+    first, last = seg[pos - W + 1], seg[pos + W]
+    return np.where(first == last, seg[pos], -1).astype(np.int8)
+
+
 def _bars(path: str):
     t = pq.read_table(path, columns=["symbol", "day", "open", "high", "low", "close"])
     sym = np.asarray(t["symbol"].to_pylist())

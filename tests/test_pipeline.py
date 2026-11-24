@@ -61,7 +61,8 @@ def world(tmp_path_factory):
            "EMB_PREFIX": str(tmp / "emb_s"), "DATASET": str(tmp / "ds.pt"),
            "STATE_DIR": str(tmp), "WINDOW": str(W), "SAMPLE_START": "2023-01-02",
            "BLOCK": "21", "VAL_FRACTION": "0.15", "TEST_FRACTION": "0.15",
-           "SPLITS": "3", "TARGET": "AAA"}
+           "SPLITS": "3", "TARGET": "AAA", "VAL_START": "2024-07-01",
+           "TEST_START": "2025-01-01"}
     return cfg, dataset.build(cfg), bars, news, days
 
 
@@ -211,3 +212,26 @@ def test_levels_and_means_fall_back_when_a_symbol_is_absent():
     assert np.isclose(lev[1], np.log(np.mean(np.exp(y[[0, 1, 2]]))))
     assert np.allclose(M[0], X[[0, 1, 2]].mean(0))
     assert np.allclose(M[1], X[[0, 1, 2]].mean(0))
+
+
+
+def test_time_split_is_forward_in_time_and_purged(world):
+    """Train < val < test by date, and no train sample's target window may reach
+    a test session (nor a test sample's headline window reach training)."""
+    cfg, ds, _, _, _ = world
+    split = dataset.time_split(ds, cfg)
+    day = ds["day"].numpy()
+    t, val, test = (day[split == i] for i in range(3))
+    assert t.min() < t.max() < val.min() and val.max() < test.min()
+    assert test.min() >= np.datetime64("2025-01-01").astype(np.int64)
+    assert val.min() >= np.datetime64("2024-07-01").astype(np.int64)
+    pos = ds["pos"].numpy()
+    cal = np.unique(pq.read_table(cfg["BARS_PATH"], columns=["day"])["day"]
+                    .cast(pa.date32()).to_numpy().astype("datetime64[D]").astype(np.int64))
+    seg = np.where(cal < np.datetime64("2024-07-01").astype(np.int64), 0,
+                   np.where(cal < np.datetime64("2025-01-01").astype(np.int64), 1, 2))
+    for k in range(3):
+        # the sample's whole span: first session of the headline window ..
+        # last session of the target window
+        assert (seg[pos[split == k] - W + 1] == k).all()
+        assert (seg[pos[split == k] + W] == k).all()

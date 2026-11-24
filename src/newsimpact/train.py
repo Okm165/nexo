@@ -35,7 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
-from newsimpact.dataset import blocked_split, load
+from newsimpact.dataset import blocked_split, load, time_split
 from newsimpact.model import fit_qlike, qlike
 
 ARMS = ("HAR", "intensity", "shuffled", "text")
@@ -107,8 +107,9 @@ def centre(X: np.ndarray, M: np.ndarray, sym: np.ndarray, start: int = 0) -> np.
     return X
 
 
-def fit_split(ds: dict, k: int, cfg: dict, E: np.ndarray) -> dict:
-    split = split_of(ds, k, cfg)
+def fit_split(ds: dict, k: int, cfg: dict, E: np.ndarray,
+              split: np.ndarray | None = None) -> dict:
+    split = split_of(ds, k, cfg) if split is None else split
     tr, va, te = (np.where(split == i)[0] for i in range(3))
     y = ds["y"].numpy().astype(np.float64)
     ctx = ds["ctx"].numpy().astype(np.float64)
@@ -193,7 +194,22 @@ def fit_split(ds: dict, k: int, cfg: dict, E: np.ndarray) -> dict:
     return out
 
 
+def _save(r: dict, out: Path, digest: str) -> None:
+    k = r["split"]
+    np.savez(out / f"split{k}.npz", idx=r["idx"], **{a: r[a] for a in (*ARMS, "persistence")})
+    meta = {"split": k, "digest": digest, "val_har": r["val_har"],
+            "val_intensity": r["val_intensity"], "selection": r["selection"]}
+    (out / f"split{k}.json").write_text(json.dumps(meta, indent=1))
+    s = r["selection"]
+    print(f"split {k:2d}: val QLIKE HAR {r['val_har']:.4f}  intensity "
+          f"{r['val_intensity']:.4f}  text {s['text']['val_qlike']:.4f} "
+          f"(k={s['text']['pcs']}, λ={s['text']['ridge']:g})  shuffled "
+          f"{s['shuffled']['val_qlike']:.4f} (k={s['shuffled']['pcs']}, "
+          f"λ={s['shuffled']['ridge']:g})", flush=True)
+
+
 def run(cfg: dict) -> None:
+    """Every arm on every purged random split (validation chooses k and λ)."""
     ds = load(cfg["DATASET"])
     E = ds["emb"].numpy()                                # float32; cast per chunk
     out = Path(cfg["STATE_DIR"]) / "runs"
@@ -201,14 +217,19 @@ def run(cfg: dict) -> None:
     for old in out.glob("split*"):
         old.unlink()
     for k in range(int(cfg["SPLITS"])):
-        r = fit_split(ds, k, cfg, E)
-        np.savez(out / f"split{k}.npz", idx=r["idx"], **{a: r[a] for a in (*ARMS, "persistence")})
-        meta = {"split": k, "digest": ds["digest"], "val_har": r["val_har"],
-                "val_intensity": r["val_intensity"], "selection": r["selection"]}
-        (out / f"split{k}.json").write_text(json.dumps(meta, indent=1))
-        s = r["selection"]
-        print(f"split {k:2d}: val QLIKE HAR {r['val_har']:.4f}  intensity "
-              f"{r['val_intensity']:.4f}  text {s['text']['val_qlike']:.4f} "
-              f"(k={s['text']['pcs']}, λ={s['text']['ridge']:g})  shuffled "
-              f"{s['shuffled']['val_qlike']:.4f} (k={s['shuffled']['pcs']}, "
-              f"λ={s['shuffled']['ridge']:g})", flush=True)
+        _save(fit_split(ds, k, cfg, E), out, ds["digest"])
+
+
+def run_holdout(cfg: dict) -> None:
+    """One time-ordered split: validation chooses k and λ, the test period is
+    scored once. Run with its own STATE_DIR so it never mixes with the random
+    splits; `evaluate` then reports this fit on its own."""
+    ds = load(cfg["DATASET"])
+    out = Path(cfg["STATE_DIR"]) / "runs"
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("split*"):
+        old.unlink()
+    split = time_split(ds, cfg)
+    print(f"holdout: train {int((split == 0).sum()):,}  val {int((split == 1).sum()):,}  "
+          f"test {int((split == 2).sum()):,} samples", flush=True)
+    _save(fit_split(ds, 0, cfg, ds["emb"].numpy(), split=split), out, ds["digest"])
