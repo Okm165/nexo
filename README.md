@@ -225,6 +225,12 @@ src/newsimpact/
 scripts/run.sh  the whole pipeline
 ```
 
+**Encoder tried and rejected:** all-MiniLM-L6-v2, a model trained for
+sentence similarity (random-headline cosine 0.14 vs ModernBERT's 0.91).
+Ran the identical fit on identical splits: it lost to ModernBERT on
+validation in 7/10 splits (mean text QLIKE 0.3701 vs 0.3688). Cleaner
+geometry did not help; the representation axis is closed.
+
 ## Limits
 
 - A single stock's test period is too small to detect a ~1% effect. The TSLA

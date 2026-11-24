@@ -1,12 +1,14 @@
 """Headlines → frozen sentence embeddings.
 
 Every headline tagged with at least one symbol present in the bars table is
-encoded by a frozen ModernBERT-base (≤64 tokens, masked mean pool). Shards
-split rows round-robin so they can run in parallel, one per device.
+encoded by the frozen ENCODER (a Hugging Face model id): ≤64 tokens, masked
+mean pool, L2-normalised — the pooling sentence-transformers models are
+trained with. Shards split rows round-robin so they can run in parallel, one
+per device.
 
-Writes $EMB_PREFIX<shard>.npz with E [N,768] float16 and src_idx [N] (row in
-NEWS_PATH); which symbols and timestamps a headline belongs to is read back
-from the news table at build time.
+Writes $EMB_PREFIX<shard>.npz with E [N, width] float32 and src_idx [N] (row
+in NEWS_PATH); which symbols and timestamps a headline belongs to is read
+back from the news table at build time.
 """
 from __future__ import annotations
 
@@ -16,7 +18,6 @@ import numpy as np
 import pyarrow.parquet as pq
 import torch
 
-MODEL_ID = "answerdotai/ModernBERT-base"
 MAX_TOKENS = 64
 BATCH = 256
 
@@ -34,10 +35,10 @@ def embed(cfg: dict, shard: int = 0, shards: int = 1, limit: int = 0,
         rows = rows[:limit]
     texts = [heads[i].strip() for i in rows]
 
-    tok = AutoTokenizer.from_pretrained(MODEL_ID)
-    model = AutoModel.from_pretrained(MODEL_ID).to(device).eval()
+    tok = AutoTokenizer.from_pretrained(cfg["ENCODER"])
+    model = AutoModel.from_pretrained(cfg["ENCODER"]).to(device).eval()
     order = np.argsort([len(t) for t in texts])          # similar lengths per batch
-    E = np.zeros((len(texts), 768), np.float16)
+    E = np.zeros((len(texts), model.config.hidden_size), np.float32)
     with torch.no_grad():
         for s in range(0, len(order), BATCH):
             b = order[s:s + BATCH]
@@ -45,7 +46,8 @@ def embed(cfg: dict, shard: int = 0, shards: int = 1, limit: int = 0,
                       max_length=MAX_TOKENS, return_tensors="pt").to(device)
             h = model(**enc).last_hidden_state
             m = enc["attention_mask"].unsqueeze(-1)
-            E[b] = ((h * m).sum(1) / m.sum(1)).float().cpu().numpy()
+            v = (h * m).sum(1) / m.sum(1)
+            E[b] = torch.nn.functional.normalize(v.float(), dim=-1).cpu().numpy()
             if (s // BATCH) % 200 == 0:
                 print(f"shard {shard}: {s + len(b)}/{len(texts)}", flush=True)
 

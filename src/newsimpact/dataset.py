@@ -113,8 +113,10 @@ def _embeddings(prefix: str):
     E, src, shard = [], [], 0
     while Path(f"{prefix}{shard}.npz").exists():
         d = np.load(f"{prefix}{shard}.npz")
-        if d["E"].ndim != 2 or d["E"].shape[1] != 768 or len(d["E"]) != len(d["src_idx"]):
-            raise ValueError(f"{prefix}{shard}.npz: expected E[N,768] and src_idx[N]")
+        if d["E"].ndim != 2 or len(d["E"]) != len(d["src_idx"]) or \
+                (E and d["E"].shape[1] != E[0].shape[1]):
+            raise ValueError(f"{prefix}{shard}.npz: expected E[N, width] (same width in "
+                             f"every shard) and src_idx[N]")
         E.append(d["E"].astype(np.float32))
         src.append(d["src_idx"].astype(np.int64))
         shard += 1
