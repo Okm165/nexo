@@ -30,8 +30,8 @@ from pathlib import Path
 
 import numpy as np
 
-from newsimpact.dataset import fold_split, load
-from newsimpact.model import fit_qlike, qlike
+from nexo.dataset import fold_split, load
+from nexo.model import fit_qlike, qlike
 
 HAR = ("logvar1", "logvar5", "logvar22", "logvar66", "logvar132")
 PRICE = (*HAR, "negret1", "negret5", "negret22")

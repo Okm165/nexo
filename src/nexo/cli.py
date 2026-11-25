@@ -1,11 +1,11 @@
-"""newsimpact — forecast next-window realized volatility from headlines + prices."""
+"""nexo — forecast next-window realized volatility from headlines + prices."""
 import argparse
 
-from newsimpact.env import load_env
+from nexo.env import load_env
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="newsimpact", description=__doc__)
+    p = argparse.ArgumentParser(prog="nexo", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("fetch-bars", help="optional: Alpaca daily OHLC for SYMBOLS -> BARS_PATH")
     sub.add_parser("fetch-news", help="optional: Alpaca headlines for SYMBOLS -> NEWS_PATH")
@@ -22,25 +22,25 @@ def main() -> None:
     cfg = load_env()
 
     if a.cmd == "fetch-bars":
-        from newsimpact.fetch import bars
+        from nexo.fetch import bars
         bars(cfg)
     elif a.cmd == "fetch-news":
-        from newsimpact.fetch import news
+        from nexo.fetch import news
         news(cfg)
     elif a.cmd == "embed":
-        from newsimpact.text import embed
+        from nexo.text import embed
         embed(cfg, a.shard, a.shards, a.limit, a.device)
     elif a.cmd == "build":
-        from newsimpact.dataset import build
+        from nexo.dataset import build
         build(cfg)
     elif a.cmd == "train":
-        from newsimpact.train import run
+        from nexo.train import run
         run(cfg)
     elif a.cmd == "forecast":
-        from newsimpact.train import forecast
+        from nexo.train import forecast
         forecast(cfg)
     else:
-        from newsimpact.evaluate import main as evaluate
+        from nexo.evaluate import main as evaluate
         evaluate(cfg)
 
 

@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from newsimpact import dataset, evaluate, train
+from nexo import dataset, evaluate, train
 
 W = 5
 

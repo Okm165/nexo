@@ -1,4 +1,4 @@
-# newsimpact
+# nexo
 
 A research pipeline that forecasts, for every symbol in a universe, the
 **realized volatility of the next `WINDOW` trading sessions** — as a number,
@@ -106,15 +106,15 @@ uv sync
 uv run pytest -q                     # includes a synthetic end-to-end run
 
 # data (optional adapters; or drop in your own parquet)
-uv run newsimpact fetch-bars         # credentials in .env
-uv run newsimpact fetch-news
-uv run newsimpact embed --shard s --shards N --device cuda:0
+uv run nexo fetch-bars         # credentials in .env
+uv run nexo fetch-news
+uv run nexo embed --shard s --shards N --device cuda:0
 
 # the pipeline
-uv run newsimpact build              # samples, inputs, targets
-uv run newsimpact train              # every arm on every walk-forward fold
-uv run newsimpact evaluate           # test-period table, DM tests, calibration
-uv run newsimpact forecast           # the deliverable: forecast.csv
+uv run nexo build              # samples, inputs, targets
+uv run nexo train              # every arm on every walk-forward fold
+uv run nexo evaluate           # test-period table, DM tests, calibration
+uv run nexo forecast           # the deliverable: forecast.csv
 scripts/run.sh                       # all of the above in order
 ```
 
@@ -139,7 +139,7 @@ inputs are plain parquet.
 ## Code
 
 ```
-src/newsimpact/
+src/nexo/
   fetch.py      optional provider adapter (bars, news)
   text.py       headline → frozen encoder embedding (≤64 tokens, mean pool)
   dataset.py    samples, target, inputs, walk-forward folds; exact hygiene rules

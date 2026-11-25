@@ -6,8 +6,8 @@ columns works just as well):
     BARS_PATH  symbol, day, open, high, low, close   (split-adjusted, SIP feed)
     NEWS_PATH  symbols (list), created_at (UTC), headline
 
-    newsimpact fetch-bars            # SYMBOLS / START from .env.data
-    newsimpact fetch-news            # replaces NEWS_PATH — point it elsewhere
+    nexo fetch-bars            # SYMBOLS / START from .env.data
+    nexo fetch-news            # replaces NEWS_PATH — point it elsewhere
                                      # if you already hold a longer archive
 Data ends at today 00:00 UTC: an unfinished session is never fetched (and
 the SIP feed refuses the latest 15 minutes on non-premium plans).

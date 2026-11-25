@@ -4,9 +4,9 @@ from pathlib import Path
 
 import numpy as np
 
-from newsimpact import dataset
-from newsimpact.metrics import diebold_mariano
-from newsimpact.model import fit_qlike, qlike
+from nexo import dataset
+from nexo.metrics import diebold_mariano
+from nexo.model import fit_qlike, qlike
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,7 +40,7 @@ def test_diebold_mariano():
 
 
 def test_every_config_key_is_read_and_paths_are_relative():
-    code = "\n".join(p.read_text() for p in (ROOT / "src" / "newsimpact").glob("*.py"))
+    code = "\n".join(p.read_text() for p in (ROOT / "src" / "nexo").glob("*.py"))
     code += (ROOT / "scripts" / "run.sh").read_text()
     for f in (".env.data", ".env.train"):
         for line in (ROOT / f).read_text().splitlines():

@@ -13,10 +13,10 @@ from pathlib import Path
 
 import numpy as np
 
-from newsimpact.dataset import load
-from newsimpact.metrics import diebold_mariano
-from newsimpact.model import qlike
-from newsimpact.train import ARMS
+from nexo.dataset import load
+from nexo.metrics import diebold_mariano
+from nexo.model import qlike
+from nexo.train import ARMS
 
 NAMES = ("persistence", *ARMS)
 PAIRS = (("HAR", "persistence"), ("price", "HAR"), ("intensity", "price"),
@@ -39,12 +39,12 @@ def main(cfg: dict) -> dict:
     files = sorted((Path(cfg["STATE_DIR"]) / "runs").glob("fold*.json"),
                    key=lambda f: int(f.stem[4:]))
     if not files:
-        raise SystemExit("no fitted folds — run `newsimpact train`")
+        raise SystemExit("no fitted folds — run `nexo train`")
     folds, parts = [], []
     for f in files:
         meta = json.loads(f.read_text())
         if meta["digest"] != ds["digest"]:
-            raise SystemExit(f"{f}: fitted on a different dataset — rerun `newsimpact train`")
+            raise SystemExit(f"{f}: fitted on a different dataset — rerun `nexo train`")
         z = np.load(f.with_suffix(".npz"))
         idx = z["idx"]
         loss = {n: qlike(z[n], y_all[idx]) for n in NAMES}

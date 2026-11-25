@@ -136,7 +136,7 @@ def _embeddings(prefix: str):
         src.append(d["src_idx"].astype(np.int64))
         shard += 1
     if not E:
-        raise FileNotFoundError(f"no embedding shards at {prefix}0.npz — run `newsimpact embed`")
+        raise FileNotFoundError(f"no embedding shards at {prefix}0.npz — run `nexo embed`")
     return np.concatenate(E), np.concatenate(src)
 
 
@@ -307,7 +307,7 @@ def load(path: str) -> dict:
     for k in ("emb", "att_emb", "att_info", "lo", "mid", "hi", "t", "pos", "day", "ctx", "y",
               "prev", "calendar", "live"):
         if k not in ds:
-            raise ValueError(f"{path}: missing {k} — rebuild with `newsimpact build`")
+            raise ValueError(f"{path}: missing {k} — rebuild with `nexo build`")
     if not torch.isfinite(ds["y"]).all() or not torch.isfinite(ds["ctx"]).all():
         raise ValueError(f"{path}: non-finite inputs or targets")
     return ds
