@@ -269,3 +269,10 @@ scripts/run.sh  the whole pipeline
   2026-11-16 — can confirm the design out of sample.
 - Headline coverage is uneven: 30% of stock-days have no headline, and list
   headlines (10+ symbols) carry 27% of attachments.
+- **The frozen encoder is not point-in-time.** ModernBERT was pretrained on
+  web text that extends beyond 2021, so its embedding of a 2021–2022 headline
+  can encode knowledge of events that came after it (the look-ahead bias
+  documented for pretrained language models by Glasserman & Lin 2023 and
+  Benhenda's Look-Ahead-Bench). Any text result here is therefore an upper
+  bound; a pre-2021-cutoff encoder, or one trained only on past news, would
+  be needed for a strictly real-time estimate.
