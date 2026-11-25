@@ -361,6 +361,13 @@ Ran the identical fit on identical splits: it lost to ModernBERT on
 validation in 7/10 splits (mean text QLIKE 0.3701 vs 0.3688). Cleaner
 geometry did not help; the representation axis is closed.
 
+**Operating policy** (decided): the fit is re-tuned in full when refitting —
+the whole selection pipeline reruns, which spends test information each time
+and can manufacture spurious gains; the 2026 holdout result below is the
+record of what such gains are worth. The universe is fixed at the 1,159
+symbols of `SYMBOLS`; new listings are invisible until that is changed
+deliberately.
+
 ## Limits
 
 - A single stock's test period is too small to detect a ~1% effect. The TSLA
