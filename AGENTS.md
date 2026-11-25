@@ -1,6 +1,6 @@
 # AGENTS.md — rules for every session on this repo
 
-Read `README.md` first; it is the only documentation.
+Read `README.md`, then `docs/METHODOLOGY.md`; they are the only documentation.
 
 ## The task (narrow on purpose)
 
@@ -23,15 +23,19 @@ at a time. Nothing else is in scope.
   lost 11% forward: never go back to them.
 - **A choice spends its data.** Whatever a design decision used — even as
   validation — cannot be claimed as test evidence afterwards. The 2023–2025
-  test periods overlap the design ablations; only 2026 (and future sessions)
-  are clean for the shipped design, and the news feed doubled in April 2026,
-  so 2026 text results are confounded by the instrument.
+  test periods overlap the design ablations, and 2026 was seen when `WINDOW`
+  was first compared (by mistake, on test QLIKE; redone on validation with
+  the same answer). Only sessions after the data end are clean. Check which
+  field a comparison reads: `eval.json` folds hold test QLIKE, `val_qlike`
+  holds validation.
 - **Fitting.** Every statistic (scaling, embedding standardisation, PCs,
   shuffled pool, coefficients) comes from the fold's train data;
   validation chooses k and λ; the test period is predicted once. Never tune
   on a test period. No per-symbol fitted terms.
 - **Loss and metric.** QLIKE on variance. MSE on log vol can mis-rank
-  forecasts under a noisy proxy. Diebold–Mariano per test period and pooled.
+  forecasts under a noisy proxy. Diebold–Mariano per test period and pooled,
+  plus the fold-level t-test and sign test; comparisons are read in the fixed
+  order of `evaluate.PAIRS`, stopping at the first failure.
 - **Controls.** Every claim about text compares `text` with `shuffled`
   (same tuning) and `intensity`, and every model with HAR and persistence.
 - **Capacity.** One stock contributes only ~180 independent weeks per year

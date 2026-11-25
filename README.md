@@ -1,183 +1,141 @@
 # nexo
 
-A research pipeline that forecasts, for every symbol in a universe, the
-**realized volatility of the next `WINDOW` trading sessions** — as a number,
-in the units an implied-volatility quote uses — from the information available
-at the close of day `t`: the symbol's volatility history, the headlines written
-about it during the previous `WINDOW` sessions, and how much news it received.
-One linear model is shared by the whole universe; the window slides one session
-at a time, so every trading day is a sample.
-
-The pipeline is deliberately narrow: one target, one loss, one evaluation
-protocol, and a set of controls that make every claim falsifiable. It is
-data-agnostic (plain parquet in, parquet out), horizon-agnostic (`WINDOW`),
-and encoder-agnostic (any Hugging Face model).
-
-## Architecture, and why
+Forecast each stock's **realized volatility over the next `WINDOW` sessions**,
+from what is known at today's close: its volatility history, its recent
+headlines, and how much news it got. Output: annualized vol per symbol, the
+unit an implied-vol quote uses. One linear model for the whole universe.
 
 ```
-bars parquet ─┐
-              ├─► fetch ─► build ─► dataset.pt ─► train ─► runs/fold* ─► evaluate ─► eval.json
-news parquet ─┘        (embed)                    (fit)                       └► forecast ─► forecast.csv
+            ┌─ headlines ──┐┌─────── target ────────┐
+ ───────────[t-W+1  ...   t][t+1       ...      t+W]───► sessions
+  lookbacks 1…132 end at t ▲
+                           forecast made at the close of t
+ the window slides one session at a time: every day is a sample
 ```
 
-Each stage is a pure function of its inputs, separated so that nothing fitted
-can leak backwards into data construction.
+The method, and the reason for each choice, are in
+**[docs/METHODOLOGY.md](docs/METHODOLOGY.md)**.
 
-| decision | justification |
+## Pipeline
+
+```
+ news ─► embed ─► embeddings ─┐
+ news ────────────────────────┤
+ bars ────────────────────────┴─► build ─► dataset ─┬─► train ─► runs ─► evaluate ─► eval.json
+                                                    └─► forecast ──────────────────► forecast.csv
+```
+
+| stage | does |
 |---|---|
-| **target: log variance of the next W sessions, Yang–Zhang from daily OHLC** | range-based estimators use the day's high/low, not just closes, and are unbiased under drift and opening jumps — several times more efficient than close-to-close for the same number of bars |
-| **loss: QLIKE on variance** | with a noisy volatility proxy, MSE on log vol mis-ranks forecasts; QLIKE keeps the ranking a true-variance loss would give (Patton 2011) and is convex, so the fit is exact by damped Newton in float64 — no SGD, no seeds, no epochs |
-| **one pooled model, no per-symbol terms** | a per-stock level fitted on training targets looks better under shuffled cross-validation, where it interpolates the test month, and loses when tested forward in time; the longest lookback carries the symbol's level instead |
-| **pooled features standardized within the training fold only** | any statistic computed over the full sample is a leak |
-| **text: frozen encoder → principal components → window means, split by recency** | headlines are sparse and short-lived; averaging all days equally dilutes the most recent session, and day-relative centering stops a changing news feed from moving forecasts on its own |
-| **evaluation: walk-forward folds** | shuffled month blocks reward anything that interpolates slow state; forward-in-time folds, purged so no target session or headline is shared across parts, are the standard in the volatility-forecasting literature |
-| **statistics: per-fold Diebold–Mariano plus a fold-level meta-test** | a pooled daily t-statistic can be significant while the effect is unstable across years; the meta-test over independent test years is what a reader should rely on |
-| **controls: persistence, HAR, and a shuffled-headline arm tuned identically** | every claim about content must beat both a no-content arm and a pure-flexibility arm, or it is not content |
+| `embed` | headline → frozen sentence embedding (any Hugging Face encoder) |
+| `build` | samples, Yang–Zhang target, inputs; exact data-hygiene rules; nothing fitted |
+| `train` | every model on every walk-forward fold; statistics from train data only |
+| `evaluate` | QLIKE per test year, Diebold–Mariano tests, fold-level test, calibration |
+| `forecast` | next-window vol per symbol from the **latest** close (not yet realized) |
 
-## Data
+## Models compared
 
-Two parquet tables, whatever their origin:
+```
+ persistence   previous window's variance                    (naive bar)
+ HAR           + log variance over 1/5/22/66/132 sessions    (standard bar)
+ price         + leverage: negative 1/5/22-session returns
+ intensity     + last session's headline count vs its norm
+ ├ shuffled    + text features of RANDOM headlines           (control)
+ └ text        + text features of the window's headlines
+```
 
-- **bars**: `symbol, day, open, high, low, close` — daily bars.
-- **news**: `symbols, created_at, headline` — headlines with publication
-  timestamps and the symbols they are about.
+## Results (one example run)
 
-An adapter for one market-data provider is included (`fetch-bars`,
-`fetch-news`; credentials in `.env`), but any source with these columns works:
-the pipeline never sees the provider. Embeddings are produced by any Hugging
-Face encoder (`ENCODER` in `.env.data`).
+About 1.2k US-listed stocks, daily bars and a vendor headline archive,
+2021–2026, `WINDOW=22` (one trading month), walk-forward test years
+2023–2026 (805 test days). Test QLIKE, skill vs HAR:
 
-## Method
+```
+ year   persistence   price    text
+ 2023      −225%      +2.1%    +3.2%
+ 2024       −24%      +2.0%    +6.4%
+ 2025       −18%      +3.6%    +8.2%
+ 2026       −17%      +1.2%    +2.3%
+ all        −87%      +2.3%    +5.2%
+```
 
-**Inputs at the close of day t.** Log variance over the last 1, 5, 22, 66, 132
-sessions (Yang–Zhang; `o² + rs` for the single session); leverage, the negative
-part of the 1/5/22-session log return; news intensity, the last session's
-headline count relative to the symbol's own recent norm; and the window's
-headlines as frozen sentence embeddings, averaged separately over the last
-session and the sessions before it, each part taken relative to the same day's
-cross-symbol mean.
+```
+ claim               per-year DM t            fold p   sign p   verdict
+ HAR > persistence   −1.6 −1.8 −1.6 −2.0      <.001    .125     holds
+ price > HAR         −3.9 −2.0 −2.7 −0.9       .034    .125     holds (not Bonferroni)
+ intensity > price   +0.8 −1.0 +0.8 +0.5       .548    .625     no
+ text > shuffled     −0.9 −2.3 −1.2 −0.5       .049    .125     not established
+```
 
-**Arms.** Each adds to the previous: `persistence` (the previous window's
-variance) → `HAR` (the variance lookbacks) → `price` (+ leverage) →
-`intensity` (+ news intensity) → `shuffled` (+ text PCs of random train
-headlines, tuned identically — the flexibility control) → `text` (+ text PCs
-of the window's headlines). The ridge penalty and the number of components are
-chosen on validation, identically for `text` and `shuffled`.
+Tested in a fixed order at α = 0.05, stopping at the first failure; the
+chain stops at intensity, so text is not formally supported. Its design was
+also chosen on validation years that overlap the test years, and the news
+feed changed in 2026. The shipped forecast therefore uses **price**.
+Calibration (predicted → realized vol by decile): 24→21, 30→26, …, 79→90,
+136→145. Full tables and caveats: [METHODOLOGY §8](docs/METHODOLOGY.md#8-results-one-run).
 
-**Selection discipline.** Feature and design choices are made by ablations on
-validation periods only, under a rule fixed before running them. A period used
-for any choice cannot afterwards be claimed as test evidence — recorded in
-`AGENTS.md` and honoured in the results below.
-
-## Results achieved (one full run, as an example)
-
-A universe of about 1.2k US-listed symbols, daily bars and a vendor headline
-archive, 2021–2026, `WINDOW = 22` (one trading month), four walk-forward folds
-with test years 2023–2026. All numbers are from the fitted runs in `state/`.
-
-Test QLIKE, skill vs the HAR arm:
-
-| test year | persistence | price | text |
-|---|---|---|---|
-| 2023 | −225% | +2.1% | +3.2% |
-| 2024 | −24% | +2.0% | +6.4% |
-| 2025 | −18% | +3.6% | +8.2% |
-| 2026 | −17% | +1.2% | +2.3% |
-| all (805 days) | −87% | **+2.3%** | **+5.2%** |
-
-- `price` vs `HAR`: positive in all four test years; fold-level meta-test
-  p = 0.033 — **established**.
-- `text` vs its shuffled control: positive in all four years, p = 0.048 —
-  **borderline**, because the design was selected on overlapping validation
-  periods and the news feed changed mid-test. It is therefore excluded from
-  the shipped forecast until confirmed on later data.
-- Calibration of predicted vs realized vol by decile: 24→21 … 136→145 —
-  the numbers read as volatility forecasts.
-
-The result generalizes as a *method*, not as these numbers: with a different
-universe, feed, or horizon, rerun the same protocol and let the same tests
-decide.
+These are numbers from one run; with your own universe, feed or horizon,
+rerun the same protocol and let the same tests decide.
 
 ## Usage
 
 ```bash
-uv sync
-uv run pytest -q                     # includes a synthetic end-to-end run
+uv sync                          # see "Torch build" for non-default hardware
+uv run pytest -q                 # 19 tests, incl. a synthetic end-to-end run
 
-# data (optional adapters; or drop in your own parquet)
-uv run nexo fetch-bars         # credentials in .env
+# data: two parquet tables (any source), or the optional adapter
+uv run nexo fetch-bars           # credentials in .env (see .env.example)
 uv run nexo fetch-news
-uv run nexo embed --shard s --shards N --device cuda:0
+uv run nexo embed --shard 0 --shards 1 --device cuda
 
-# the pipeline
-uv run nexo build              # samples, inputs, targets
-uv run nexo train              # every arm on every walk-forward fold
-uv run nexo evaluate           # test-period table, DM tests, calibration
-uv run nexo forecast           # the deliverable: forecast.csv
-scripts/run.sh                       # all of the above in order
+uv run nexo build                # → state/dataset.pt
+uv run nexo train                # → state/runs/fold*.{npz,json}
+uv run nexo evaluate             # → state/eval.json
+uv run nexo forecast             # → state/forecast.csv
+scripts/run.sh                   # all of the above
 ```
 
-Artifacts go to `STATE_DIR`: `dataset.pt`, `runs/fold<k>.{npz,json}`,
-`eval.json`, `forecast.csv`.
+Input schemas:
+
+```
+ bars  symbol, day, open, high, low, close         (daily)
+ news  symbols (list), created_at (UTC), headline
+```
 
 ## Configuration
 
 | file | keys |
 |---|---|
 | `.env.data` | `SYMBOLS` (list or `@file`), `START`, `BARS_PATH`, `NEWS_PATH`, `EMB_PREFIX`, `DATASET`, `STATE_DIR`, `ENCODER` |
-| `.env.train` | `WINDOW`, `SAMPLE_START`, `FOLDS` (the walk-forward cut dates) |
-| `.env` | provider credentials, needed only by the fetchers |
+| `.env.train` | `WINDOW`, `SAMPLE_START`, `FOLDS` |
+| `.env` | provider credentials (fetchers only; never committed) |
 
-The example run referenced above used: `WINDOW=22`, `SAMPLE_START=2021-01-01`,
+The example run: `WINDOW=22`, `SAMPLE_START=2021-01-01`,
 `FOLDS=2022-01-01,2023-01-01,2024-01-01,2025-01-01,2026-01-01`.
-
-The OS environment overrides any key, so variants (`WINDOW=10`,
-`STATE_DIR=state/w10`, …) run without editing files. Paths are repo-relative;
-inputs are plain parquet.
+OS environment overrides any key (`WINDOW=10 STATE_DIR=state/w10 uv run nexo build`).
+Paths are repo-relative. Everything under `data/` and `state/` is
+regenerated and gitignored.
 
 **Torch build.** The lockfile pins torch to a GPU-specific wheel index. On
-different hardware, point the index at your build before `uv sync`: CPU
-`https://download.pytorch.org/whl/cpu`, CUDA `…/cu121` (see
-`.github/workflows/ci.yml`, which runs the full test suite on the CPU build).
+other hardware, point `[[tool.uv.index]]` in `pyproject.toml` at your build
+(`…/whl/cpu`, `…/whl/cu121`, …) and `uv lock`. CI does exactly this for CPU.
 
 ## Code
 
 ```
 src/nexo/
-  fetch.py      optional provider adapter (bars, news)
-  text.py       headline → frozen encoder embedding (≤64 tokens, mean pool)
-  dataset.py    samples, target, inputs, walk-forward folds; exact hygiene rules
-  model.py      QLIKE and its exact penalized fit (damped Newton, float64)
-  train.py      per fold: text features, k/λ selection, every arm, predictions
-  evaluate.py   QLIKE, skill, Diebold–Mariano, fold-level meta-test, calibration
-  metrics.py    Diebold–Mariano
-scripts/run.sh  the whole pipeline
+  dataset.py   samples, target, inputs, walk-forward folds, hygiene rules
+  text.py      headline embeddings (frozen encoder)
+  model.py     QLIKE and its exact penalized fit (damped Newton, float64)
+  train.py     text features, k/λ selection, every model, predictions, forecast
+  evaluate.py  QLIKE, skill, Diebold–Mariano, fold-level test, calibration
+  metrics.py   Diebold–Mariano, Student-t p-value, fold-level test
+  fetch.py     optional data adapter
+  cli.py env.py
 ```
 
 ## Extending
 
-The narrow scope is a choice, and the seams are where you would widen it:
-
-- **horizon**: `WINDOW` (anything from 1 session up, as long as the news
-  archive covers the sample start);
-- **universe**: `SYMBOLS` (any list; the model is pooled, so adding symbols
-  only adds samples);
-- **text representation**: `ENCODER` (any Hugging Face model; a domain-trained
-  encoder may do better than a general one — test, do not assume);
-- **target quality**: intraday bars would replace the daily Yang–Zhang proxy
-  and remove most of the measurement noise;
-- **scheduled events**: an earnings calendar is the most predictable
-  volatility feature the current input set lacks.
-
-## Limits
-
-- The target from daily bars is noisy; the worst 1% of samples carry about a
-  third of the loss, which is why the horizon decision matters.
-- News archives change what they publish; check volume and template stability
-  across the sample before trusting any text result.
-- A frozen encoder pretrained on web text is not point-in-time: its embeddings
-  may encode knowledge of events after a headline's date, so text results are
-  upper bounds.
-- Every design choice spends the data it used; the README of each run should
-  say which periods informed which choices.
+`WINDOW` (horizon), `SYMBOLS` (universe), `ENCODER` (text model) are config.
+The biggest untried levers are data, not model: intraday bars for a cleaner
+target, an earnings calendar, a news archive with stable coverage.
