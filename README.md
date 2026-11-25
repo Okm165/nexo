@@ -139,3 +139,7 @@ src/nexo/
 `WINDOW` (horizon), `SYMBOLS` (universe), `ENCODER` (text model) are config.
 The biggest untried levers are data, not model: intraday bars for a cleaner
 target, an earnings calendar, a news archive with stable coverage.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
