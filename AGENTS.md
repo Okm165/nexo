@@ -6,7 +6,8 @@ Read `README.md` first; it is the only documentation.
 
 Forecast the log annualized Yang–Zhang variance of the NEXT `WINDOW`
 sessions per symbol — one pooled model over the universe, reported for the
-universe (a single stock's ~200 test days cannot resolve a ~1% effect) — from
+universe (a single stock's few hundred test days cannot resolve a ~1%
+effect) — from
 what is known at the close of day t: its log variance over 1/5/22/66/132
 sessions, the negative part of its 1/5/22-session returns, its news intensity,
 and its headlines from the last `WINDOW` sessions, split into the last session
@@ -33,8 +34,9 @@ at a time. Nothing else is in scope.
   forecasts under a noisy proxy. Diebold–Mariano per test period and pooled.
 - **Controls.** Every claim about text compares `text` with `shuffled`
   (same tuning) and `intensity`, and every model with HAR and persistence.
-- **Capacity.** One stock is ~180 independent weeks; a network memorized it.
-  Fit pooled; report the universe, not one stock.
+- **Capacity.** One stock contributes only ~180 independent weeks per year
+  of data; a network memorized it. Fit pooled; report the universe, not one
+  stock.
 - **Config.** `.env` credentials, `.env.data` paths, `.env.train` design;
   OS environment wins; no absolute paths; every key is read (tested).
 - **Scope.** Prefer deleting code to adding it.
