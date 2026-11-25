@@ -38,9 +38,9 @@ at a time. Nothing else is in scope.
   order of `evaluate.PAIRS`, stopping at the first failure.
 - **Controls.** Every claim about text compares `text` with `shuffled`
   (same tuning) and `intensity`, and every model with HAR and persistence.
-- **Capacity.** One stock contributes only ~180 independent weeks per year
-  of data; a network memorized it. Fit pooled; report the universe, not one
-  stock.
+- **Capacity.** One stock gives about 50 non-overlapping weeks a year (about
+  12 non-overlapping 22-session windows); a network memorized it. Fit pooled;
+  report the universe, not one stock.
 - **Config.** `.env` credentials, `.env.data` paths, `.env.train` design;
   OS environment wins; no absolute paths; every key is read (tested).
 - **Scope.** Prefer deleting code to adding it.

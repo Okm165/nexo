@@ -108,10 +108,11 @@ any model change (§8).
  h = w · [1, log var 1/5/22/66/132, leverage, intensity, text PCs]    one w for all stocks
 ```
 
-- **Linear.** One stock gives ~180 independent weeks a year. An attention
-  network trained on one stock memorized it (train QLIKE 0.02) and never
-  beat HAR on validation. Pooling ~1.2k stocks gives over a million samples
-  for a few hundred coefficients.
+- **Linear.** A year of one stock holds about 50 non-overlapping weeks, and
+  only about 12 non-overlapping 22-session windows: far too few for a flexible
+  model. An attention network trained on one stock memorized it (train QLIKE
+  0.02) and never beat HAR on validation. Pooling 1,154 stocks gives 1.57
+  million samples for at most 522 coefficients (10 price/news + 2 × 256 text).
 - **No per-symbol level.** A level estimated from each stock's own training
   targets improved shuffled cross-validation by 5.4%, and lost 10.9% when
   tested forward in time. Under shuffled folds the level is fitted on months
@@ -180,8 +181,21 @@ HAR vs persistence is the case here.
 
 ## 8. Results (one run)
 
-About 1.2k US-listed stocks, 2021–2026, daily bars plus one vendor's headline
-archive. Encoder: ModernBERT-base.
+**Data of this run.**
+
+| item | value |
+|---|---|
+| source | the bundled Alpaca adapter (`fetch.py`): daily bars, split-adjusted, consolidated (SIP) feed; headlines from the same provider's news API |
+| universe | 1,159 US-listed symbols in `SYMBOLS`; 1,154 produce samples; 1,041 have valid inputs at the latest close (2026-11-23) |
+| how the universe was chosen | consistent with "the most-covered names in the headline archive": 1,117 of the 1,159 are among its 1,159 most-tagged symbols, and every member has ≥465 headlines. Delisted names are included (77 symbols' bars end before June 2026) |
+| samples | 1,569,899 (symbol, day) pairs, 2021-01-04 … 2026-10-22 |
+| headlines | 860,207 headlines, 1,371,087 (headline, symbol) attachments |
+| encoder | ModernBERT-base, frozen |
+
+**Reading the numbers.**
+
+- **QLIKE** is a mean loss, so lower is better. **Skill vs HAR** is `1 − QLIKE / QLIKE_HAR`: +2% means 2% less loss than HAR.
+- **A test year** holds only the samples whose whole span lies inside that calendar year. With W=22, each year therefore runs from about 22 sessions after 1 January to about 22 sessions before 31 December (for example 2023-02-02 … 2023-11-28). 2026 ends on 2026-10-22, the last day whose 22-session target had fully happened by the data end.
 
 **Horizon.** Mean validation skill vs HAR (validation years 2022–2025):
 
@@ -224,6 +238,10 @@ it.
 - **The forecast beats the naive bar every year**, and it is calibrated
   (predicted → realized vol by decile: 24→21, 30→26, 33→31, 37→35, 42→40,
   47→48, 54→56, 63→70, 79→90, 136→145). This is the claim to rely on.
+  Persistence loses by a very different amount each year (−225% in 2023,
+  −17% in 2026): its worst 1% of forecasts carry 83% of its 2023 loss,
+  because QLIKE punishes under-prediction exponentially, and a calm month
+  is often followed by a violent one.
 - **Leverage and the daily term add ~2%**, positive in all four years. They
   pass the fixed sequence but not Bonferroni. Treat this as likely, not
   proven.
@@ -243,33 +261,40 @@ The shipped forecast therefore uses the **price** model.
 | threat | effect | status |
 |---|---|---|
 | design choices spend data | ablations used validation years 2022–2025, which are test years of other folds | only sessions after the data end are fully clean |
-| news feed not stationary | volume doubled from April 2026, with new templates | day-relative features mitigate it; text claims stay open |
+| news feed not stationary | tagged headlines per month were ~20k until March 2026, then 32k (April) and 78k (May), with new templates such as "X Adjusts Price Target" | day-relative features mitigate it; text claims stay open |
 | encoder not point-in-time | a pretrained encoder may know events after a headline's date (look-ahead documented for language models in finance) | text results are an upper bound |
 | proxy noise | daily-bar target; heavy-tailed loss | W=22; intraday bars would be better |
-| universe fixed at one date | if drawn from currently listed names, it is survivorship-biased | affects levels more than arm comparisons; check how `SYMBOLS` was built |
+| universe chosen with hindsight | membership matches news coverage counted over the whole 2021–2026 archive, test years included; delisted names stay in | biases *which* stocks are studied (heavily covered ones), not any forecast input; build `SYMBOLS` from data before your first test year to remove it |
 | short sample | 5 labeled years, 4 test periods | low power; fold-level tests are coarse |
 | many related tests | 5 comparisons × 5 periods | fixed-sequence and Bonferroni reported |
 
 ## 10. Rejected, with measurements
 
-| idea | outcome |
-|---|---|
-| per-symbol level (fixed effects) | +5.4% on shuffled blocks, −10.9% forward: removed |
-| market volatility factor | better in 2/4 validation folds: removed |
-| news count over the whole window | 1/4 folds: replaced by the last session's |
-| single-symbol headlines only | text worse in 4/4 folds |
-| one equal-weight 5-day text mean | lost to the recency split in 4/4 folds |
-| all 768 embedding dims | better on validation, worse on test (overfit) |
-| sentence-similarity encoder (MiniLM) | lost on validation in 7/10 splits |
-| empirical-Bayes shrinkage of window means | better in 3/10 splits |
-| attention network, single stock | memorized; never beat HAR on validation |
-| W = 5, 10 | lower validation skill than W = 22 on every row (§8) |
+Two protocols were used over the project's life: first 10 shuffled
+month-block splits (abandoned, see §5–6), then walk-forward folds. The
+protocol behind each measurement is shown.
+
+| idea | outcome | protocol |
+|---|---|---|
+| per-symbol level (fixed effects) | +5.4% on shuffled blocks, −10.9% forward: removed | both, W=5 |
+| market volatility factor | better in 2/4 validation folds: removed | walk-forward, W=5 |
+| news count over the whole window | 1/4 folds: replaced by the last session's | walk-forward, W=5 |
+| single-symbol headlines only | text worse in 4/4 folds | walk-forward, W=5 |
+| one equal-weight text mean over the window | lost to the recency split in 4/4 folds | walk-forward, W=5 |
+| all 768 embedding dims | better on validation, worse on test (overfit) | shuffled, W=5 |
+| sentence-similarity encoder (MiniLM) | lost on validation in 7/10 splits | shuffled, W=5 |
+| empirical-Bayes shrinkage of window means | better in 3/10 splits | shuffled, W=5 |
+| attention network, single stock | memorized; never beat HAR on validation | time split, W=5 |
+| W = 5, 10 | lower validation skill than W = 22 on every row (§8) | walk-forward |
+
+The shuffled-split results may not hold under walk-forward evaluation; they
+were not rerun.
 
 ## 11. Reproduce
 
 ```bash
-scripts/run.sh                  # build → train → evaluate → forecast
-uv run pytest -q                # point in time, purge, target by hand, live rows, p-values
+just all                        # embed → build → train → evaluate → forecast
+just check                      # point in time, purge, target by hand, live rows, p-values
 ```
 
 `eval.json` holds every number in §8. `build` stamps an md5 over every
