@@ -5,7 +5,10 @@ sessions, from what is known **at today's close**: its price history and the
 headlines written about it during the **previous window**. The window slides
 one session at a time, so every trading day is a sample. One model is fitted
 across a universe of stocks (1,159 by default), and results are reported for
-the universe and for a target stock (`TARGET`, default **TSLA**).
+the universe; a single stock can be reported with `TARGET=<symbol>`, but by
+default it is not — one stock's 144–216 test days cannot resolve an effect
+of about 1% (TSLA measured −0.56% on random splits, +8.32% on the holdout:
+pure noise).
 
 The output is a number: annualized variance (shown as vol %) of the next
 `WINDOW` sessions (default 5), the unit an implied-volatility quote uses. It
