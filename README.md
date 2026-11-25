@@ -166,7 +166,9 @@ Universe (about 155k test samples per split):
 | shuffled | 0.344 ± 0.033 | −0.12% ± 0.22% | 9/10 | 0.851 |
 | **text** | **0.340 ± 0.032** | **+0.96% ± 0.69%** | — | 0.851 |
 
-TSLA (about 144 test days per split):
+TSLA (about 144 test days per split; historical — `TARGET` is now empty and
+reporting is universe-only, because one stock's 144–216 test days can never
+resolve an effect of about 1%):
 
 | predictor | QLIKE | skill vs HAR | text better in |
 |---|---|---|---|
@@ -329,7 +331,8 @@ and λ) and `eval.json`.
 `.env.data` holds `SYMBOLS` (a comma list, or `@file` with one symbol per
 line, e.g. `@data/input/symbols.txt`), `START` and the paths; `.env.train` holds
 `WINDOW` (5), `SAMPLE_START` (2021-01-01), `BLOCK` (21), `VAL_FRACTION` /
-`TEST_FRACTION` (0.15), `SPLITS` (10), `TARGET` (TSLA) and the holdout
+`TEST_FRACTION` (0.15), `SPLITS` (10), `TARGET` (empty: universe-only
+reporting) and the holdout
 boundaries `VAL_START` (2025-01-01) / `TEST_START` (2026-01-01). `.env` holds credentials, needed
 only by the fetchers. The OS environment overrides any key. Paths are
 repo-relative and inputs are plain parquet, so any source with the same
