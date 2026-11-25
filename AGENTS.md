@@ -7,10 +7,11 @@ Read `README.md` first; it is the only documentation.
 Forecast the log annualized Yang–Zhang variance of the NEXT `WINDOW`
 sessions per symbol — one pooled model over the universe, reported for the
 universe (a single stock's ~200 test days cannot resolve a ~1% effect) — from
-what is known at the close of day t:
-its log-variance lookbacks (5/22/66/132), its news intensity, and its
-headlines from the last `WINDOW` sessions. One sample per day; the window
-slides one session at a time. Nothing else is in scope.
+what is known at the close of day t: its log variance over 1/5/22/66/132
+sessions, the negative part of its 1/5/22-session returns, its news intensity,
+and its headlines from the last `WINDOW` sessions, split into the last session
+and the sessions before it. One sample per day; the window slides one session
+at a time. Nothing else is in scope.
 
 - **Point in time.** A headline counts at the first close (20:00 UTC) at or
   after its publication. Tested in `tests/test_pipeline.py`.
