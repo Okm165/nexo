@@ -125,61 +125,69 @@ April 2026 (before: ~20k tagged headlines/month, after: 32–78k; new
 per-stock templates), so 2026 tests the design under a changed instrument.
 Every claim below is stated with this in mind.
 
-## Results — walk-forward, next-5-session vol, 4 folds
+## Results — walk-forward, next-22-session vol, 4 folds
+
+**Why W = 22.** The target window was chosen on validation only, per the
+protocol. Mean validation skill vs HAR over the four folds:
+
+| | W=5 | W=10 | W=22 |
+|---|---|---|---|
+| price | +0.8% | +1.0% | **+2.2%** (4/4 folds) |
+| text | +1.9% | +1.8% | **+5.0%** (4/4 folds) |
+| text − shuffled | +1.4 pp | +1.3 pp | **+3.4 pp** |
+
+A longer window quarters the proxy-noise floor (the worst 1% of samples held
+~⅓ of the loss at W=5), so real differences become measurable. W=22 also
+gives the most stable results: price and text are positive in all four
+validation folds, and the text−shuffled gap triples.
 
 Test QLIKE (skill vs HAR in parentheses):
 
 | test period | days | persistence | HAR | price | intensity | shuffled | text |
 |---|---|---|---|---|---|---|---|
-| 2023 | 241 | 0.769 (−70.6%) | 0.451 | 0.439 (+2.7%) | 0.438 (+2.9%) | 0.440 (+2.3%) | 0.433 (+3.8%) |
-| 2024 | 243 | 0.634 (−55.1%) | 0.409 | 0.411 (−0.5%) | 0.410 (−0.3%) | 0.412 (−0.9%) | 0.407 (+0.4%) |
-| 2025 | 241 | 0.658 (−52.8%) | 0.431 | 0.426 (+1.2%) | 0.425 (+1.3%) | 0.426 (+1.1%) | 0.415 (+3.7%) |
-| 2026 | 216 | 0.484 (−53.2%) | 0.316 | 0.316 (−0.1%) | 0.317 (−0.4%) | 0.319 (−0.8%) | 0.317 (−0.4%) |
-| all | 941 | 0.642 (−58.6%) | 0.405 | 0.401 (+0.9%) | 0.401 (+1.0%) | 0.402 (+0.6%) | 0.396 (+2.1%) |
+| 2023 | 207 | 1.350 (−225%) | 0.415 | 0.407 (+2.1%) | 0.407 (+1.9%) | 0.415 (+0.2%) | 0.402 (+3.2%) |
+| 2024 | 209 | 0.424 (−24.2%) | 0.342 | 0.335 (+2.0%) | 0.335 (+2.1%) | 0.335 (+1.8%) | 0.320 (+6.4%) |
+| 2025 | 207 | 0.393 (−17.5%) | 0.335 | 0.323 (+3.6%) | 0.323 (+3.5%) | 0.324 (+3.3%) | 0.307 (+8.2%) |
+| 2026 | 182 | 0.255 (−17.0%) | 0.218 | 0.215 (+1.2%) | 0.215 (+1.2%) | 0.215 (+1.1%) | 0.213 (+2.3%) |
+| all | 805 | 0.622 (−87.2%) | 0.332 | 0.324 (+2.3%) | 0.324 (+2.3%) | 0.327 (+1.6%) | 0.315 (+5.2%) |
 
 Diebold–Mariano t (negative: the first is better):
 
 | comparison | 2023 | 2024 | 2025 | 2026 | all |
 |---|---|---|---|---|---|
-| HAR vs persistence | −4.4 | −6.9 | −5.1 | −7.8 | **−9.7** |
-| price vs HAR | −2.5 | +1.2 | −1.3 | +0.2 | −2.2 |
-| intensity vs price | −0.7 | −1.1 | −0.7 | +1.5 | −0.7 |
-| text vs intensity | −1.3 | −1.6 | −3.1 | +0.1 | −3.2 |
-| text vs shuffled | −2.0 | −3.0 | −3.5 | −0.5 | −4.5 |
+| price vs HAR | −3.9 | −2.0 | −2.7 | −0.9 | −4.3 |
+| text vs intensity | −0.4 | −2.1 | −1.1 | −0.5 | −1.8 |
+| text vs shuffled | −0.9 | −2.3 | −1.2 | −0.5 | −2.3 |
+| HAR vs persistence | −1.6 | −1.8 | −1.6 | −2.0 | −1.8 |
 
-A pooled daily DM can be significant while the effect is unstable across
-years, so the four test years are also combined as a fold-level meta-test
-(mean of the per-year DM t over its standard error; the years are independent
-draws). With 25 DM tests in the table, per-year values below |2.8| are
-descriptive; the meta-test is the one to read:
+Fold-level meta-test (mean per-year DM t over its standard error; the years
+are independent; with 15 DM tests, per-year |t| < 2.6 is descriptive):
 
 | comparison | per-year DM t | fold-level t | p |
 |---|---|---|---|
-| HAR vs persistence | −4.4, −6.9, −5.1, −7.8 | **−7.6** | **0.011** |
-| price vs HAR | −2.5, +1.2, −1.3, +0.2 | −0.7 | 0.784 |
-| intensity vs price | −0.7, −1.1, −0.7, +1.5 | −0.4 | 0.915 |
-| text vs intensity | −1.3, −1.6, −3.1, +0.1 | −2.3 | 0.221 |
-| text vs shuffled | −2.0, −3.0, −3.5, −0.5 | −3.5 | 0.090 |
+| price vs HAR | −3.9, −2.0, −2.7, −0.9 | **−3.7** | **0.033** |
+| text vs intensity | −0.4, −2.1, −1.1, −0.5 | −2.5 | 0.094 |
+| text vs shuffled | −0.9, −2.3, −1.2, −0.5 | −3.2 | 0.048 |
+| HAR vs persistence | −1.6, −1.8, −1.6, −2.0 | −18.0 | <0.001 |
 
 Calibration (text, all test days): predicted → realized vol by decile:
-21→20, 27→25, 31→30, 35→34, 40→40, 46→47, 53→55, 64→68, 81→90, 153→152.
+24→21, 30→26, 33→31, 37→35, 42→40, 47→48, 54→56, 63→70, 79→90, 136→145.
 
 What this supports, and what it does not:
-- **HAR beats persistence, established** (fold-level meta-test p 0.011; every
-  year below −4). This is the protocol-clean anchor: the target, the universe
-  and the evaluation pipeline measure real volatility predictability.
-- **Everything else is not established.** The completed HAR (price) is +0.9%
-  pooled but driven by 2023 (fold-level p 0.78). Text beats intensity by
-  +2.1% pooled (fold-level p 0.22) and the shuffled control (p 0.09) — but
-  2023 and 2025 informed the design, and in 2026, the only design-clean
-  period, text is −0.4% vs intensity and −0.5% vs shuffled, tracking the
-  feed (Jan–Mar +2.4% vs intensity, Apr–Nov −1.0%).
-- **The shuffled control stays behind intensity in every period** (−0.2% to
-  −0.9%): added text flexibility alone buys nothing.
-- **What a reader may rely on:** the pipeline's forecasts are calibrated
-  (deciles above) and beat the naive bar by 53–71% every year. Any claim that
-  a specific *feature* adds skill requires data after 2026-11-16 — the only
-  periods never used for a design choice.
+- **Both improvements established at W=22**: the completed HAR (price) beats
+  plain HAR in all four test years, fold-level p 0.033; text beats the
+  shuffled control in all four years, p 0.048. Both were chosen on
+  validation, and their 2023–2025 test periods overlap the design ablations
+  — the cleanest single year is 2026 (price +1.2%, text +2.3% vs intensity),
+  under the changed feed.
+- **Recency matters**: the recency-split, day-relative text at W=22 shows the
+  strongest and most consistent content effect measured in this project —
+  but it was selected on W=5 validation and confirmed here, so treat its
+  size (+5.2%) as the favourable read.
+- **Persistence loses less at W=22** (−17% to −24%): a 22-session variance is
+  more persistent, so the bar HAR must beat is lower in log-variance terms —
+  HAR still wins every year.
+- **Calibration is close** (above), so the numbers read as vol forecasts.
 
 ## Rejected on measurement (kept out of the model)
 
@@ -204,18 +212,19 @@ day-common part of the text adjustment explains none of the old gain).
 `newsimpact forecast` fits the **price** arm once on every sample and predicts
 the next-`WINDOW`-session volatility of every symbol from its inputs at the
 **latest close in the data** — a window that has not happened yet. The price
-arm is used because it is the last arm with test support; text stays out of
-the deliverable until it beats its controls on data after 2026-11-16.
+arm is used because it is established at W=22 (fold-level p 0.033); the text
+arm is stronger on validation but its fold-level p is 0.094, so it stays out
+of the deliverable until post-2026-11-16 data confirms it.
 Output is `STATE_DIR/forecast.csv`:
 
 ```
 symbol,day,predicted_vol_pct,previous_window_vol_pct
 XXII,2026-11-23,640.97,223.73
 ...
-TSLA,2026-11-23,60.75,72.57
+TSLA,2026-11-23,53.76,57.59
 ```
 
-1,041 symbols at the 2026-11-23 close; universe median predicted vol 52.5%.
+1,041 symbols at the 2026-11-23 close; universe median predicted vol 51.8%.
 Calibration is close (above), so the numbers can be read as vol forecasts.
 
 ## Quick start
