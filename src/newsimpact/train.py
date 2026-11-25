@@ -102,6 +102,22 @@ def centre(X: np.ndarray, M: np.ndarray, sym: np.ndarray, start: int = 0) -> np.
     return X
 
 
+def pcs(E: np.ndarray, rows: np.ndarray, npc: int) -> np.ndarray:
+    """Every embedding row's scores on the top `npc` principal components of
+    the correlation matrix of the rows `rows` (float64, chunked)."""
+    X = E.astype(np.float64)
+    s1, s2 = np.zeros(X.shape[1]), np.zeros((X.shape[1], X.shape[1]))
+    for c in _chunks(rows):
+        Xc = X[c]
+        s1 += Xc.sum(0)
+        s2 += Xc.T @ Xc
+    mu = s1 / len(rows)
+    cov = s2 / len(rows) - np.outer(mu, mu)
+    sd = np.sqrt(np.maximum(np.diag(cov), 0)) + 1e-6
+    V = np.linalg.eigh(cov / np.outer(sd, sd))[1][:, ::-1][:, :npc]
+    return np.concatenate([((X[c] - mu) / sd) @ V for c in _chunks(np.arange(len(X)))])
+
+
 def fit_split(ds: dict, k: int, cfg: dict, E: np.ndarray,
               split: np.ndarray | None = None) -> dict:
     split = split_of(ds, k, cfg) if split is None else split
@@ -121,19 +137,7 @@ def fit_split(ds: dict, k: int, cfg: dict, E: np.ndarray,
     np.add.at(cover, lo[tr], 1)
     np.add.at(cover, hi[tr], -1)
     rows = np.unique(att[np.cumsum(cover)[:-1] > 0])
-    # moments and covariance of the train headlines, accumulated in float64 chunks
-    s1, s2 = np.zeros(E.shape[1]), np.zeros((E.shape[1], E.shape[1]))
-    for c in _chunks(rows):
-        X = E[c].astype(np.float64)
-        s1 += X.sum(0)
-        s2 += X.T @ X
-    mu = s1 / len(rows)
-    cov = s2 / len(rows) - np.outer(mu, mu)
-    sd = np.sqrt(np.maximum(np.diag(cov), 0)) + 1e-6
-    corr = cov / np.outer(sd, sd)                        # covariance of standardised vectors
-    V = np.linalg.eigh(corr)[1][:, ::-1][:, : max(PCS)]  # top components, descending
-    scores = np.concatenate([((E[c].astype(np.float64) - mu) / sd) @ V
-                             for c in _chunks(np.arange(len(E)))])
+    scores = pcs(E, rows, max(PCS))                      # train headlines' components
     shuf = np.random.default_rng(k).choice(rows, len(att))
 
     one = np.ones((len(y), 1))
@@ -260,18 +264,7 @@ def _text_features(ds: dict, E: np.ndarray, npc: int, sym: np.ndarray,
     headlines' correlation matrix, window means standardized, centred per
     symbol, empty windows at the neutral 0 before centring."""
     lo, hi, att = ds["lo"].numpy(), ds["hi"].numpy(), ds["att_emb"].numpy()
-    X = E.astype(np.float64)
-    s1, s2 = np.zeros(X.shape[1]), np.zeros((X.shape[1], X.shape[1]))
-    for c in _chunks(np.arange(len(X))):
-        Xc = X[c]
-        s1 += Xc.sum(0)
-        s2 += Xc.T @ Xc
-    mu, cov = s1 / len(X), s2 / len(X) - np.outer(s1 / len(X), s1 / len(X))
-    sd = np.sqrt(np.maximum(np.diag(cov), 0)) + 1e-6
-    corr = cov / np.outer(sd, sd)
-    V = np.linalg.eigh(corr)[1][:, ::-1][:, :npc]
-    scores = np.concatenate([((X[c] - mu) / sd) @ V for c in _chunks(np.arange(len(X)))])
-    T = window_means(ds, scores[att])
+    T = window_means(ds, pcs(E, np.arange(len(E)), npc)[att])
     mu_t, sd_t = T.mean(0), T.std(0)
     T = (T - mu_t) / np.where(sd_t > 0, sd_t, 1.0)
     T[hi == lo] = 0.0
