@@ -1,6 +1,8 @@
 """Forecast-comparison primitives."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 
@@ -28,3 +30,38 @@ def diebold_mariano(loss_a: np.ndarray, loss_b: np.ndarray, pos: np.ndarray,
     if var <= 0:                       # identical forecasts: equally accurate, t = 0
         return float(d.mean()), 0.0
     return float(d.mean()), float(d.mean() / np.sqrt(var / T))
+
+
+def t_pvalue(t: float, df: int) -> float:
+    """Two-sided p-value of Student's t: I_x(df/2, 1/2) with x = df/(df+t²).
+
+    The incomplete beta is integrated after substituting u = x·v^(1/a), which
+    makes the integrand (1 − x·v^(1/a))^(−1/2) bounded on [0, 1] (Simpson).
+    """
+    if t == 0:
+        return 1.0
+    a, x = df / 2, df / (df + t * t)
+    v = np.linspace(0.0, 1.0, 20001)
+    f = (1 - x * v ** (1 / a)) ** -0.5
+    integral = (f[0] + f[-1] + 4 * f[1:-1:2].sum() + 2 * f[2:-1:2].sum()) / (3 * (len(v) - 1))
+    log_b = math.lgamma(a) + math.lgamma(0.5) - math.lgamma(a + 0.5)
+    return float(min(1.0, x ** a / a * integral / math.exp(log_b)))
+
+
+def fold_meta(ts: list[float]) -> dict:
+    """Combine per-fold DM t-statistics from independent test periods.
+
+    t-test that their mean is zero (heterogeneity across periods enters the
+    standard error, so a result carried by one period does not pass), and a
+    two-sided sign test on the count of periods in which the first forecast is
+    better — distribution-free, but with n periods its p cannot go below
+    2^(1-n). With few periods neither is decisive alone; report both.
+    """
+    ts = np.asarray(ts, dtype=np.float64)
+    n, k = len(ts), int((ts < 0).sum())
+    tail = sum(math.comb(n, j) for j in range(min(k, n - k) + 1)) / 2 ** n
+    out = {"first_better": k, "n": n, "sign_p": min(1.0, 2 * tail)}
+    if n < 2 or ts.std(ddof=1) == 0:
+        return out | {"t": float("nan"), "p": float("nan")}
+    t = float(ts.mean() / (ts.std(ddof=1) / math.sqrt(n)))
+    return out | {"t": t, "p": t_pvalue(t, n - 1)}

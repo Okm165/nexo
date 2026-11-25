@@ -2,9 +2,9 @@
 
 Metric: QLIKE (robust to the noisy variance proxy), and skill vs HAR
 (1 − QLIKE/QLIKE_HAR). Every comparison gets a Diebold–Mariano test on the
-daily mean loss difference, per test period and over all test days together;
-the per-period results show whether a pooled result holds in each year or
-comes from one of them.
+daily mean loss difference, per test period and over all test days together,
+and a fold-level t-test over the per-period DM statistics: a pooled result
+carried by one period does not pass it.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from nexo.dataset import load
-from nexo.metrics import diebold_mariano
+from nexo.metrics import diebold_mariano, fold_meta
 from nexo.model import qlike
 from nexo.train import ARMS
 
@@ -62,6 +62,8 @@ def main(cfg: dict) -> dict:
 
     rep = {"window": W, "digest": ds["digest"], "folds": folds,
            "all": _score(loss, pos, group, W - 1),
+           "fold_meta": {f"{a} vs {b}": fold_meta([f["dm_t"][f"{a} vs {b}"] for f in folds])
+                         for a, b in PAIRS},
            "calibration_text": [{"decile": i + 1, "pred_vol_pct": vol(h[dec == i]),
                                  "realized_vol_pct": vol(y[dec == i])} for i in range(10)]}
     _print(rep)
@@ -84,6 +86,10 @@ def _print(rep: dict) -> None:
     for a, b in PAIRS:
         p = f"{a} vs {b}"
         print(f"{p:24s}" + "".join(f"{r['dm_t'][p]:+12.2f}" for _, r in rows))
+    print("fold-level t-test over the per-period DM t (independent periods)")
+    for p, m in rep["fold_meta"].items():
+        print(f"  {p:22s} t={m['t']:+6.2f}  p={m['p']:.3f}  first better in "
+              f"{m['first_better']}/{m['n']} (sign test p={m['sign_p']:.3f})")
     print("text: (k, λ) chosen on validation: "
           + ", ".join(f"({f['selection']['text']['pcs']}, {f['selection']['text']['ridge']:g})"
                       for f in rep["folds"]))

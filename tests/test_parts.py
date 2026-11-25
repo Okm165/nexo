@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from nexo import dataset
-from nexo.metrics import diebold_mariano
+from nexo.metrics import diebold_mariano, fold_meta, t_pvalue
 from nexo.model import fit_qlike, qlike
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,3 +67,15 @@ def test_digest_covers_every_input():
     assert dataset._digest([b]) != dataset._digest([a])            # value change
     assert dataset._digest([a, a]) != dataset._digest([a])         # count
     assert dataset._digest([a.reshape(4, 3)]) != dataset._digest([a])  # shape
+
+
+def test_t_pvalue_matches_tables_and_fold_meta():
+    for t, df in ((12.7062, 1), (4.3027, 2), (3.1824, 3), (2.7764, 4), (2.2281, 10)):
+        assert abs(t_pvalue(t, df) - 0.05) < 2e-4         # two-sided 5% critical values
+    assert t_pvalue(0.0, 3) == 1.0 and t_pvalue(-3.1824, 3) == t_pvalue(3.1824, 3)
+    m = fold_meta([-2.0, -2.2, -1.8, -2.0])
+    assert m["first_better"] == 4 and m["t"] < -10 and m["p"] < 0.01
+    assert m["sign_p"] == 0.125                               # 2 · (1/2)^4: the floor at n = 4
+    assert fold_meta([-1.0, 1.0, -1.0, 1.0])["sign_p"] == 1.0
+    one = fold_meta([-8.0, 0.1, 0.2, -0.1])                # carried by one period
+    assert one["p"] > 0.3
