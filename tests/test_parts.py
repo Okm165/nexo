@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from newsimpact import dataset
-from newsimpact.metrics import diebold_mariano, spearman
+from newsimpact.metrics import diebold_mariano
 from newsimpact.model import fit_qlike, qlike
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,9 +31,7 @@ def test_fit_qlike_reaches_the_optimum():
     assert qlike(A @ fit_qlike(A, y), y).mean() < qlike(A @ ols, y).mean()
 
 
-def test_metrics():
-    y = np.arange(100.0)
-    assert abs(spearman(y ** 3, y) - 1.0) < 1e-12
+def test_diebold_mariano():
     pos = np.arange(100)
     rng = np.random.default_rng(0)
     la = rng.random(100)
@@ -56,8 +54,9 @@ def test_every_config_key_is_read_and_paths_are_relative():
 def test_readme_states_the_configured_design():
     readme = (ROOT / "README.md").read_text()
     for line in (ROOT / ".env.train").read_text().splitlines():
-        if line.startswith(("WINDOW=", "SAMPLE_START=", "BLOCK=")):
-            assert line.split("=")[1] in readme, f"README out of sync with {line}"
+        if line.startswith(("WINDOW=", "SAMPLE_START=", "FOLDS=")):
+            for value in line.split("=")[1].split(","):
+                assert value in readme, f"README out of sync with {line}"
 
 
 def test_digest_covers_every_input():

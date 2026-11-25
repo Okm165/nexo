@@ -15,10 +15,9 @@ def main() -> None:
     e.add_argument("--limit", type=int, default=0, help="first N headlines only (smoke test)")
     e.add_argument("--device", default="cuda")
     sub.add_parser("build", help="sliding-window samples, inputs and targets")
-    sub.add_parser("train", help="fit every arm on every random split")
-    sub.add_parser("holdout", help="one time-ordered split: unread test period")
-    sub.add_parser("forecast", help="fit on all data, predict the next window per symbol")
-    sub.add_parser("evaluate", help="score all splits vs HAR and persistence")
+    sub.add_parser("train", help="fit every arm on every walk-forward fold")
+    sub.add_parser("forecast", help="predict the next window from the latest close")
+    sub.add_parser("evaluate", help="score every fold's test period, with DM tests")
     a = p.parse_args()
     cfg = load_env()
 
@@ -37,9 +36,6 @@ def main() -> None:
     elif a.cmd == "train":
         from newsimpact.train import run
         run(cfg)
-    elif a.cmd == "holdout":
-        from newsimpact.train import run_holdout
-        run_holdout(cfg)
     elif a.cmd == "forecast":
         from newsimpact.train import forecast
         forecast(cfg)

@@ -4,12 +4,6 @@ from __future__ import annotations
 import numpy as np
 
 
-def spearman(p: np.ndarray, y: np.ndarray) -> float:
-    """Rank correlation (continuous inputs; ties are negligible)."""
-    rp, ry = np.argsort(np.argsort(p)), np.argsort(np.argsort(y))
-    return float(np.corrcoef(rp, ry)[0, 1])
-
-
 def diebold_mariano(loss_a: np.ndarray, loss_b: np.ndarray, pos: np.ndarray,
                     group: np.ndarray, lag: int) -> tuple[float, float]:
     """Diebold–Mariano test of equal accuracy, A vs B (negative = A better).

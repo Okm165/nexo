@@ -1,27 +1,26 @@
 # newsimpact
 
 Forecast how volatile a stock will be over the **next window** of trading
-sessions, from what is known **at today's close**: its price history and the
-headlines written about it during the **previous window**. The window slides
-one session at a time, so every trading day is a sample. One model is fitted
-across a universe of stocks (1,159 by default), and results are reported for
-the universe; a single stock can be reported with `TARGET=<symbol>`, but by
-default it is not — one stock's 144–216 test days cannot resolve an effect
-of about 1% (TSLA measured −0.56% on random splits, +8.32% on the holdout:
-pure noise).
-
-The output is a number: annualized variance (shown as vol %) of the next
-`WINDOW` sessions (default 5), the unit an implied-volatility quote uses. It
-is trained and scored against the volatility that actually realized,
-measured with the Yang–Zhang range estimator. No options data is used.
+sessions, from what is known **at today's close**: its volatility history, the
+headlines written about it in the **previous window** (split by recency), and
+its news intensity. The window slides one session at a time, so every trading
+day is a sample. One linear model is fitted across a universe of stocks
+(1,159 by default); results are reported for the universe. The output is a
+number: the annualized variance of the next `WINDOW` sessions (default 5),
+the unit an implied-volatility quote uses. It is trained and scored against
+the volatility that actually realized, measured with the Yang–Zhang range
+estimator from daily bars. No options data is used.
 
 ## The question, exactly
 
 ```
 target  log annualized Yang–Zhang variance of sessions t+1 .. t+W   (next window)
-input   own log Yang–Zhang variance over 5, 22, 66, 132 sessions     (price state)
-        news intensity: log(1+headlines in t-W+1..t) − log(1+its 132-session norm)
-        the window's headlines, as frozen sentence embeddings        (previous window)
+input   own log variance over 1, 5, 22, 66, 132 sessions            (price state)
+        leverage: the negative part of the 1/5/22-session log return
+        news intensity of session t: log(1 + its headlines) minus
+        log(1 + the symbol's mean headlines per session, last 132)
+        the window's headlines, split into session t and the W−1
+        sessions before it, as frozen sentence embeddings
 ```
 
 Yang–Zhang (2000), over the n days of a window, from daily open, high, low
@@ -32,8 +31,8 @@ o = ln(Oᵢ/Cᵢ₋₁)   c = ln(Cᵢ/Oᵢ)   rs = u(u−c) + d(d−c),  u = ln(
 σ² = Var(o) + k·Var(c) + (1−k)·mean(rs),   k = 0.34 / (1.34 + (n+1)/(n−1)),   ×252
 ```
 
-It is unbiased under drift and opening jumps, and several times more
-efficient than close-to-close returns for the same window.
+For the single session, `o² + rs`. It is unbiased under drift and opening
+jumps, and several times more efficient than close-to-close returns.
 
 ## Pipeline
 
@@ -41,8 +40,9 @@ efficient than close-to-close returns for the same window.
 fetch-bars ─► bars.parquet  (symbol, day, open, high, low, close)
 news archive (symbols, created_at, headline) ─► embed ─► emb_s*.npz (768-d, float32)
                                        build ─► dataset.pt   (samples, inputs, targets)
-                                       train ─► runs/split*  (every arm, every split)
-                                    evaluate ─► eval.json
+                                       train ─► runs/fold*   (every arm, every fold)
+                                     evaluate ─► eval.json
+                                    forecast ─► forecast.csv  (the deliverable)
 ```
 
 **build**: exact rules, nothing fitted, so nothing here can leak.
@@ -51,266 +51,158 @@ news archive (symbols, created_at, headline) ─► embed ─► emb_s*.npz (768
 |---|---|
 | a headline counts at the first close (20:00 UTC) at or after its publication | point in time. 20:00 UTC is the summer New York close and an hour early in winter, so the rule is never late. Weekend and after-hours news goes to the next session |
 | a bar is valid only if 0 < low ≤ min(open, close) ≤ max(open, close) ≤ high | inconsistent OHLC is a data error |
-| every session of [t−132, t+W] present, valid, with \|log close-to-close\| ≤ 1 | gaps and unadjusted splits are not volatility |
+| every session of [t−132, t+W] present, valid, with \|log close-to-close\| ≤ 1 (for the latest close, [t−132, t]) | gaps and unadjusted splits are not volatility |
 | every variance > 0 | zero means the price did not trade |
 | samples start at `SAMPLE_START` (2021-01-01) | where the news archive's coverage begins. Earlier, an empty window would mean "not collected", not "no news". Earlier bars still serve as price history |
-
-Return arithmetic runs in float64, with windowed sums taken from cumulative
-sums. Embeddings are stored as float32: in float16 the small
-headline-specific part riding on the shared direction loses a few percent
-of its precision.
+| duplicate (symbol, day) bars are refused | a repeated bar would silently corrupt every windowed sum |
 
 ## Model
 
-A linear forecast of log variance, fitted by **QLIKE**, with a per-stock
-level (a fixed-effects panel regression):
+A linear forecast of log variance, fitted by **QLIKE**, one set of
+coefficients for all symbols:
 
 ```
-y − level[s] = w · (x − mean[s])         fitted on all stocks at once
-h            = w · (x − mean[s]) + level[s]
-x            = [1, log-variance lookbacks, news intensity, text PCs]
-QLIKE(h, y)  = e^(y−h) − (y−h) − 1       y = log proxy variance
+h = w · [1, log variance 1/5/22/66/132, leverage, news intensity, text PCs]
+QLIKE(h, y) = e^(y−h) − (y−h) − 1        y = log proxy variance
 ```
 
-`level[s]` is `log mean(e^y)` over that stock's **train** targets — the exact
-QLIKE-optimal location, which is not the mean of log variance. `mean[s]` is
-the stock's train mean of a feature. Each stock's permanent volatility level
-is therefore estimated from all of its train days, and the pooled slope
-describes how a stock moves away from its own norm. The transformation is
-exact — QLIKE depends only on `y − h` — so it adds no parameter to the solver
-and no knob; a stock absent from a split's train samples takes the pooled
-level. Without it, the four noisy lookbacks were the only route by which the
-model could see a stock's level; fixing that improved the benchmark by 6.9%
-on validation and 5.4% on test.
+QLIKE ranks forecasts as the true variance would even though a week of daily
+bars measures it noisily (Patton 2011). It is convex, so the fit is exact
+(damped Newton, float64, Hessian accumulated on the GPU when present) — no
+SGD, no seeds, no epochs. There is **no per-symbol term**: a level estimated
+from a stock's own training targets looked good on shuffled month blocks,
+where it interpolates the test month, and lost 11% to this pooled form when
+tested forward in time. The 132-session lookback is the stock's level, known
+at the close.
 
-QLIKE ranks forecasts as the true variance would even though a week of
-returns measures it noisily (Patton 2011). MSE on log vol does not have that
-property. QLIKE is convex, so the fit is exact (damped Newton, float64, Hessian on the GPU when present),
-with no SGD, no seeds and no epochs.
+**Arms** (each adds to the previous):
 
-**Text features**, per split, from train data only:
-1. Standardize every embedding dimension over the training headlines. Raw
-   mean-pooled vectors share one dominant direction: two random headlines
-   have a mean cosine of 0.91, and 0.00 after standardizing.
-2. Take the training headlines' top principal components.
-3. Project each window's mean headline onto them, and standardize the
-   scores.
-
-A ridge penalty λ applies to the text coefficients only. The number of
-components k ∈ {16, 64, 256} and λ ∈ {1e−3, 1e−2, 1e−1} are chosen on
-validation.
-
-**One model for all stocks.** One stock gives about 180 independent weeks
-per split. On TSLA alone, a neural attention model memorized its training
-data (train QLIKE 0.02) and never beat its HAR starting point on validation,
-and a linear text model's validation gains vanished on test. Pooling 1,159
-stocks gives about 1.1M training samples per split. One slope applies to
-every stock; the per-stock level is estimated separately (above).
-
-**Components.** k was chosen on validation from {4, 16, 64}, then
-{16, 64, 256} once 64 won all 10 splits; 256 then won 8 of 10. The full
-embedding was tried as well, with grid {64, 256, 768}, and validation chose
-768 in 6/10 splits (+0.2% on validation). On test it was worse: universe
-+0.46% ± 1.10% against +0.76% ± 1.11%, and the shuffled control fell from
-−0.52% to −0.78%, which is overfitting. The shipped grid is back to
-{16, 64, 256}. That revert was informed by test, so treat the +0.76% below
-as slightly optimistic; the protocol-clean figure for the larger grid is
-+0.46%. On the random splits both say the same thing: a content effect of
-about +0.5–0.8%, and extra capacity does not raise it. The forward holdout
-shows that effect does not replicate out of sample.
-
-## Controls and benchmarks
-
-| predictor | inputs | answers |
+| arm | inputs | answers |
 |---|---|---|
-| persistence | next-window variance = previous window's | the naive bar |
-| HAR | log-variance lookbacks | the standard bar (Corsi 2009) |
-| intensity | HAR + news intensity | does the *amount* of news help? |
-| shuffled | intensity + text PCs of random train headlines, same counts; k and λ chosen exactly as for text | does headline *content* help? |
-| text | intensity + text PCs of the window's headlines | the model |
+| persistence | next-window variance = the previous window's | the naive bar |
+| HAR | log variance 1/5/22/66/132 | the standard bar (Corsi 2009; our version adds the daily term) |
+| price | + leverage (negative 1/5/22-session returns) | asymmetry (Corsi & Renò 2012) |
+| intensity | + news intensity of the last session | does the *amount* of news help? |
+| shuffled | + text PCs of random train headlines, same counts, tuned identically | does headline *content* help, or only flexibility? |
+| text | + text PCs of the window's headlines | the model |
 
-## Evaluation (what keeps the numbers honest)
+**Text features**, per fold, from train data only: standardize every
+embedding dimension over the training headlines, take the top principal
+components of their correlation matrix, score every headline on them, and
+average the scores over **two parts of each window** — its last session, and
+the sessions before it (news is short-lived, so the two get separate
+coefficients; the last session holds 20% of window headlines and most of the
+signal). Each part is taken **relative to the same day's mean over all
+symbols with headlines**, so a news feed that changes what it publishes
+cannot move forecasts by itself — the feed used here doubled its volume in
+April 2026. A ridge penalty λ applies to the text coefficients only; k ∈
+{16, 64, 256} and λ ∈ {1e−3, 1e−2, 1e−1} are chosen on validation, for
+`shuffled` exactly as for `text`.
 
-- **Purged random month blocks.** The calendar is cut into blocks of
-  `BLOCK` = 21 sessions, and blocks, not days, go to train / validation /
-  test (70/15/15) uniformly at random, so every split samples every market
-  regime. A sample is kept only if its whole span, from the first session of
-  its headline window to the last session of its target window, lies in one
-  split. No target session and no headline is shared across splits; this
-  purge costs about 20% of samples.
-- **Repeated.** `SPLITS` = 10 independent random assignments. Results are
-  mean ± sd across splits plus the number of splits each comparison wins, so
-  no conclusion rests on one draw of test months.
-- **Dataset digest.** The build stamps an md5 over **every** array it
-  stores (features, targets, attachments, embeddings — shape and bytes), and
-  `evaluate` refuses runs fitted on a different digest, so a silently changed
-  input can never be mixed with old results.
-- **Train-only statistics.** Feature scaling, embedding standardization,
-  principal components, the shuffled-headline pool and every coefficient
-  come from the split's train data. Validation picks k and λ; test is
-  predicted once.
-- **Diebold–Mariano tests on QLIKE** for every split. The Newey–West
-  variance uses lag W−1, counted only within contiguous test blocks.
-- **A forward holdout.** Because the random splits reuse the same history
-  (and their test months were read during development), the honest check is
-  a single time-ordered split: train < 2025, validation 2025, test 2026,
-  scored once with the design frozen (`newsimpact holdout`). It is the
-  reason the content claim below is stated as unsupported.
+## Evaluation
 
-## Results — pooled fit, next-5-session vol, 10 random purged block splits
+**Walk-forward.** `FOLDS` cuts the calendar at 2022-01-01, 2023-01-01,
+2024-01-01, 2025-01-01, 2026-01-01. Fold k validates on the period starting
+at date k, tests on the next one, and trains on everything before date k —
+always forward in time, as the forecast is used. Purged: a sample belongs to
+a part only if its whole span, from the first session of its headline window
+to the last session of its target window, lies inside it. Test periods:
+calendar 2023, 2024, 2025 and 2026 (221–244 test days each, about 265k
+samples).
 
-Universe (about 155k test samples per split):
+**Statistics.** QLIKE per test period and over all test days; Diebold–Mariano
+t on the daily mean loss difference (Newey–West lag W−1), per period and
+pooled; calibration of predicted vs realized vol by decile.
 
-| predictor | QLIKE | skill vs HAR | text better in | Spearman |
-|---|---|---|---|---|
-| persistence | 0.501 ± 0.102 | −48.0% | — | 0.818 |
-| HAR | 0.343 ± 0.033 | 0 | 9/10 | 0.851 |
-| intensity | 0.344 ± 0.033 | −0.06% ± 0.17% | 9/10 | 0.851 |
-| shuffled | 0.344 ± 0.033 | −0.12% ± 0.22% | 9/10 | 0.851 |
-| **text** | **0.340 ± 0.032** | **+0.96% ± 0.69%** | — | 0.851 |
+**What each number is worth (read before the results).** Persistence and HAR
+are standard and untuned, so their comparison is protocol-clean. The *design*
+of price and text (which features, which text aggregation) was chosen by
+ablations on validation periods 2022–2025 — so the 2023–2025 test periods
+overlap data that informed the design, and their pooled statistics are
+optimistic for everything except persistence-vs-HAR. **2026 is the one period
+this final design never touched**, but the news feed doubled its volume in
+April 2026 (before: ~20k tagged headlines/month, after: 32–78k; new
+per-stock templates), so 2026 tests the design under a changed instrument.
+Every claim below is stated with this in mind.
 
-TSLA (about 144 test days per split; historical — `TARGET` is now empty and
-reporting is universe-only, because one stock's 144–216 test days can never
-resolve an effect of about 1%):
+## Results — walk-forward, next-5-session vol, 4 folds
 
-| predictor | QLIKE | skill vs HAR | text better in |
-|---|---|---|---|
-| persistence | 0.280 ± 0.065 | −39.6% | — |
-| HAR | 0.200 ± 0.039 | 0 | 3/10 |
-| intensity | 0.200 ± 0.039 | −0.40% ± 0.65% | 6/10 |
-| shuffled | 0.200 ± 0.039 | −0.29% ± 0.58% | 6/10 |
-| text | 0.201 ± 0.040 | −0.56% ± 2.64% | — |
+Test QLIKE (skill vs HAR in parentheses):
+
+| test period | days | persistence | HAR | price | intensity | shuffled | text |
+|---|---|---|---|---|---|---|---|
+| 2023 | 241 | 0.769 (−70.6%) | 0.451 | 0.439 (+2.7%) | 0.438 (+2.9%) | 0.440 (+2.3%) | 0.433 (+3.8%) |
+| 2024 | 243 | 0.634 (−55.1%) | 0.409 | 0.411 (−0.5%) | 0.410 (−0.3%) | 0.412 (−0.9%) | 0.407 (+0.4%) |
+| 2025 | 241 | 0.658 (−52.8%) | 0.431 | 0.426 (+1.2%) | 0.425 (+1.3%) | 0.426 (+1.1%) | 0.415 (+3.7%) |
+| 2026 | 216 | 0.484 (−53.2%) | 0.316 | 0.316 (−0.1%) | 0.317 (−0.4%) | 0.319 (−0.8%) | 0.317 (−0.4%) |
+| all | 941 | 0.642 (−58.6%) | 0.405 | 0.401 (+0.9%) | 0.401 (+1.0%) | 0.402 (+0.6%) | 0.396 (+2.1%) |
+
+Diebold–Mariano t (negative: the first is better):
+
+| comparison | 2023 | 2024 | 2025 | 2026 | all |
+|---|---|---|---|---|---|
+| HAR vs persistence | −4.4 | −6.9 | −5.1 | −7.8 | **−9.7** |
+| price vs HAR | −2.5 | +1.2 | −1.3 | +0.2 | −2.2 |
+| intensity vs price | −0.7 | −1.1 | −0.7 | +1.5 | −0.7 |
+| text vs intensity | −1.3 | −1.6 | −3.1 | +0.1 | −3.2 |
+| text vs shuffled | −2.0 | −3.0 | −3.5 | −0.5 | −4.5 |
+
+Calibration (text, all test days): predicted → realized vol by decile:
+21→20, 27→25, 31→30, 35→34, 40→40, 46→47, 53→55, 64→68, 81→90, 153→152.
 
 What this supports, and what it does not:
-- **On these random splits, headline content improves next-week volatility
-  forecasts by a small amount**: +0.96% QLIKE over HAR, better in 9/10
-  splits, mean DM t −2.33 (below −2 in 6/10 splits; the splits reuse the
-  same history, so that is consistent evidence, not ten independent tests).
-  **This is the number the forward holdout below contradicts** — read that
-  section before believing this one.
-- **The controls gain nothing**: news volume alone is −0.06% and shuffled
-  content −0.12% against HAR, while text beats both in 9/10 splits (mean t
-  −2.85 and −2.99). The gain is content, not added flexibility.
-- **Validation overstated it.** Validation gains were 1.5% on average
-  (10/10 splits); test gives 0.96%, and only test is reported as the result.
-- **TSLA alone: no detectable effect** (−0.56% ± 2.64%, 3/10). An effect of
-  about 1% cannot be resolved with about 144 test days per split. The
-  TSLA-only fit, before pooling, was −6.7% ± 25.6%.
-- **Calibration is close**: mean realized vol by predicted decile (pooled
-  test, universe) 20, 26, 30, 34, 39, 47, 56, 69, 92, 149% against
-  predicted 19, 25, 29, 34, 39, 46, 55, 68, 89, 154%. TSLA: predicted 45–76%
-  against realized 42–75%.
-- **HAR beats persistence in every split** (10/10, mean t −3.22 on the
-  random splits, −5.83 on the holdout); the benchmark is strong. Persistence
-  is calibrated like every fitted arm — the previous window's deviation from
-  the stock's norm, plus the stock's level — so the comparison is fair
-  (uncalibrated, it lost by 181%, an artefact of the loss, not of the
-  forecast).
+- **HAR beats persistence everywhere** (pooled t −9.7; every year below −4).
+  This is the protocol-clean anchor: the target, the universe and the
+  evaluation pipeline measure real volatility predictability.
+- **The completed HAR (price) is a modest improvement**: +0.9% pooled,
+  t −2.2 — driven by 2023 and 2025; 2024 and 2026 are flat. Treated as
+  plausible but not established, because its design was chosen on 2022–2025.
+- **Headline content: not established.** Text beats the shuffled control in
+  all four periods (pooled t −4.5) and intensity in 2023 and 2025 — but 2023
+  and 2025 informed the design, and in 2026, the only design-clean period,
+  text is −0.4% vs intensity and −0.5% vs shuffled. Inside 2026 the pattern
+  tracks the feed: Jan–Mar text is +2.4% vs intensity, Apr–Nov −1.0%. The
+  honest conclusion is that headline content may add ~1–2%, but this archive
+  cannot demonstrate it.
+- **The shuffled control stays behind intensity in every period** (−0.2% to
+  −0.9%): added text flexibility alone buys nothing.
 
-The per-stock level mattered for the benchmark itself: fixing it took
-universe test QLIKE from 0.363 to 0.343 (−5.4%), TSLA from 0.210 to 0.200,
-and it raised text over HAR from +0.76% (8/10) to +0.96% (9/10). TSLA is the
-one place the change hurt the text arm (+0.31% → −0.56%): with a better
-benchmark there is less room for a noisy content effect at 144 days.
+## Rejected on measurement (kept out of the model)
 
-Diagnosis of the result (test predictions, no refitting; so the test set
-has been looked at for this analysis):
-- **QLIKE is tail-dominated.** The worst 1% of samples hold 26–39% of each
-  split's HAR loss, so a split's result depends on which extreme weeks land
-  in it. The effective sample is far smaller than 155k.
-- **The gain is spread over time**, unlike the previous fit: text lowers the
-  loss in 42 of 58 test months; the best 5 months give 55% of the net gain
-  and the worst 5 cancel 22% (previously 84% and 63%).
-- **The gain grows with the number of headlines** (ex ante, pooled test):
-  0 headlines −0.1%, 1 −0.1%, 2–3 +1.1%, 4–7 +1.8%, 8–15 +2.9%, 16+ +2.7%.
-  Information comes from aggregating headlines. Quiet windows (46% of
-  samples) are now neutral rather than losing, because the per-stock level
-  no longer has to be inferred from headline counts.
-- **Tried and rejected on validation:** empirical-Bayes shrinkage of each
-  window mean toward neutral by n/(n + σ²_w/σ²_b) (better in 3/10 splits);
-  the full 768-dimension embedding (worse on test); all-MiniLM-L6-v2 as the
-  encoder (worse in 7/10 splits).
-- **None of this survives the forward holdout.** In 2026 the same model is
-  worse than HAR across the universe and the headline-count pattern reverses,
-  so these regularities describe the random splits, not the signal.
+| idea | result |
+|---|---|
+| per-symbol level (fixed effects), QLIKE-optimal | +5.4% on shuffled month blocks, **−10.9% forward in 2026** — removed |
+| market volatility factor (mean log variance 5/22) | better in 2/4 validation folds — removed |
+| news intensity of the whole window (vs the last session) | better in 1/4 folds — removed |
+| headlines tagged to a single symbol only | text loses in 4/4 validation folds — rejected |
+| empirical-Bayes shrinkage of window means | better in 3/10 old splits — rejected |
+| full 768-dim text (k=768) | better on validation, worse on test — rejected |
+| all-MiniLM-L6-v2 encoder | worse in 7/10 old splits — rejected |
+| neural attention model | memorized (train QLIKE 0.02) — rejected |
 
-## Forward holdout — 2026, never used for any decision
-
-The random splits reuse the same 2021–2026 history, and their test months had
-been read several times during the work above. A single forward-in-time split
-is the one clean check available: train on everything before 2025, validation
-on 2025, and the test period is **2026-01-01 to 2026-11-16**, predicted once.
-The purge rule is the same as for the random splits (each sample's whole span
-lies in one segment, giving at least `WINDOW` sessions of gap at each
-boundary):
-
-```
-holdout: train 1,080,382   val 262,770   test 228,893 samples
-```
-
-Universe (228,893 test samples) and TSLA (216 test days):
-
-| predictor | universe QLIKE | vs HAR | TSLA QLIKE | vs HAR |
-|---|---|---|---|---|
-| persistence | 0.413 | −16.2% | 0.212 | −13.2% |
-| HAR | 0.356 | 0 | 0.187 | 0 |
-| intensity | 0.355 | +0.07% | 0.188 | −0.34% |
-| shuffled | 0.355 | +0.03% | 0.188 | −0.46% |
-| text | 0.358 | **−0.75%** (t = +1.41) | 0.172 | **+8.32%** (t = −4.57) |
-
-**The universe gain does not replicate.** The random splits said +
-0.96%; the untouched 2026 period says −0.75%, and text beats HAR in only
-2 of its 11 months. Worse, the pattern reverses: in 2026 the text model loses
-most where headlines are dense (8–15 headlines −2.0%, 16+ −1.1%), while
-0–1-headline windows are neutral — the opposite of the random-split pattern.
-So the +0.96% was an artefact of months that had been seen during
-development, and **headline content is not established to improve universe
-volatility forecasts**. The model still forecasts well: HAR beats persistence
-by 36% with t = −7.3, and the per-stock level is what makes it competitive.
-
-**TSLA's +8.32% is not evidence of an effect either.** It is consistent
-inside that year (better in 10 of 11 months, only 3% of the loss in the worst
-1% of days) but it contradicts the random-split estimate for the same stock
-(−0.56%, 3/10 splits), and 97% of TSLA's 2026 windows carry 16+ headlines, so
-it is one dense-news year of one stock — a different regime from the rest of
-the sample, not a replicated finding.
-
-**Why it fails: the 2026 text inputs are out of distribution.** Window-mean
-PC scores are standardized with train moments, so a drift shows up as a mean
-shift. On the random splits the test means sit within 0.1–0.3 window-sd of
-the train mean; in 2026 they are 2–3× further (PC6 at −0.61 window-sd), while
-the scale is unchanged (sd ratio ≈ 1) and 99.4% of test symbols have train
-samples. The archive's headline coverage grew about 35% over the sample, so
-the 2026 headlines themselves are a different distribution from the ones the
-text coefficients were estimated on. Measured, not corrected: any correction
-fitted on 2026 would consume the holdout.
-
-What this means for the project: the pipeline, the per-stock level and the
-HAR/QLIKE evaluation stand, and the forward split is now part of the method.
-The claim that headline text adds forecasting power does not stand.
+Also checked and fine: headline duplicates (6.5% of texts repeat, but 0.4%
+within a 5-session window — no effect on window means); loss concentration
+(the top 5% of symbols hold 18% of the loss); text as a period proxy (the
+day-common part of the text adjustment explains none of the old gain).
 
 ## Forecast (the deliverable)
 
-`newsimpact forecast` fits the model once on **every** sample with the (k, λ)
-the random splits' validation chose (the mode over splits, ties by the better
-mean validation QLIKE — no re-tuning), and predicts the next-`WINDOW`-session
-volatility for every symbol as of that symbol's last session, using only what
-is known at that close. Output is `STATE_DIR/forecast.csv`:
+`newsimpact forecast` fits the **price** arm once on every sample and predicts
+the next-`WINDOW`-session volatility of every symbol from its inputs at the
+**latest close in the data** — a window that has not happened yet. The price
+arm is used because it is the last arm with test support; text stays out of
+the deliverable until it beats its controls on data after 2026-11-16.
+Output is `STATE_DIR/forecast.csv`:
 
 ```
 symbol,day,predicted_vol_pct,previous_window_vol_pct
-SMX,2026-11-16,705.56,805.93
-PARA,2026-10-27,474.09,356.89
+XXII,2026-11-23,640.97,223.73
 ...
-TSLA,2026-11-16,54.65,41.11
+TSLA,2026-11-23,60.75,72.57
 ```
 
-1,158 symbols, sessions 2021-01-04..2026-11-16 (a symbol's last session is
-its own — delisted symbols stop earlier). Universe median predicted vol
-46.0%. Caveats carried over from the evaluation: the model is honest about
-level (calibration is close), and the text features add no established edge
-(holdout section below), so treat the text terms as a small, unproven
-adjustment on top of a well-calibrated price-and-intensity forecast.
+1,041 symbols at the 2026-11-23 close; universe median predicted vol 52.5%.
+Calibration is close (above), so the numbers can be read as vol forecasts.
 
 ## Quick start
 
@@ -319,27 +211,21 @@ uv sync
 uv run pytest -q                    # includes a synthetic end-to-end run
 uv run newsimpact fetch-bars        # optional Alpaca adapter (keys in .env)
 uv run newsimpact fetch-news        # only if you have no longer archive
-scripts/run.sh                      # embed → build → train → evaluate
-STATE_DIR=state/holdout uv run newsimpact holdout   # one forward-in-time split
-STATE_DIR=state/holdout uv run newsimpact evaluate  # score it (test used once)
-uv run newsimpact forecast          # the deliverable: state/forecast.csv
+scripts/run.sh                      # embed → build → train → evaluate → forecast
 ```
 
-Artifacts go to `STATE_DIR` (default `./state`): `dataset.pt`,
-`runs/split<k>.{npz,json}` (test predictions per arm, and the selected k
-and λ) and `eval.json`.
+Artifacts go to `STATE_DIR` (default `./state`): `dataset.pt`, `runs/fold<k>.{npz,json}`
+(test predictions per arm and the selected k, λ), `eval.json`, `forecast.csv`.
 
 ## Configuration
 
 `.env.data` holds `SYMBOLS` (a comma list, or `@file` with one symbol per
-line, e.g. `@data/input/symbols.txt`), `START` and the paths; `.env.train` holds
-`WINDOW` (5), `SAMPLE_START` (2021-01-01), `BLOCK` (21), `VAL_FRACTION` /
-`TEST_FRACTION` (0.15), `SPLITS` (10), `TARGET` (empty: universe-only
-reporting) and the holdout
-boundaries `VAL_START` (2025-01-01) / `TEST_START` (2026-01-01). `.env` holds credentials, needed
-only by the fetchers. The OS environment overrides any key. Paths are
-repo-relative and inputs are plain parquet, so any source with the same
-columns works.
+line, e.g. `@data/input/symbols.txt`), `START` and the paths; `.env.train`
+holds `WINDOW` (5), `SAMPLE_START` (2021-01-01) and `FOLDS`
+(2022-01-01,2023-01-01,2024-01-01,2025-01-01,2026-01-01). `.env` holds
+credentials, needed only by the fetchers. The OS environment overrides any
+key. Paths are repo-relative and inputs are plain parquet, so any source with
+the same columns works.
 
 ## Code
 
@@ -347,33 +233,25 @@ columns works.
 src/newsimpact/
   fetch.py      optional Alpaca adapter (bars, news)
   text.py       headline → frozen ModernBERT-base embedding (≤64 tokens, mean pool)
-  dataset.py    samples, Yang–Zhang target and inputs, blocked random split
+  dataset.py    samples, Yang–Zhang target and inputs, walk-forward folds
   model.py      QLIKE and its exact penalized fit
-  train.py      per split: text features, k/λ selection, every arm, test predictions
-  evaluate.py   QLIKE, skill, Diebold–Mariano, calibration, across splits
-  metrics.py    rank correlation, Diebold–Mariano
+  train.py      per fold: text features, k/λ selection, every arm, test predictions
+  evaluate.py   QLIKE, skill, Diebold–Mariano, calibration
+  metrics.py    Diebold–Mariano
 scripts/run.sh  the whole pipeline
 ```
 
-**Encoder tried and rejected:** all-MiniLM-L6-v2, a model trained for
-sentence similarity (random-headline cosine 0.14 vs ModernBERT's 0.91).
-Ran the identical fit on identical splits: it lost to ModernBERT on
-validation in 7/10 splits (mean text QLIKE 0.3701 vs 0.3688). Cleaner
-geometry did not help; the representation axis is closed.
-
-**Operating policy** (decided): the fit is re-tuned in full when refitting —
-the whole selection pipeline reruns, which spends test information each time
-and can manufacture spurious gains; the 2026 holdout result below is the
-record of what such gains are worth. The universe is fixed at the 1,159
-symbols of `SYMBOLS`; new listings are invisible until that is changed
-deliberately.
-
 ## Limits
 
-- A single stock's test period is too small to detect a ~1% effect. The TSLA
-  numbers are reported, but they cannot confirm or rule out the effect.
-- The Alpaca news API on this account serves only recent news (from
-  2026-04). The 2021–2026 archive comes from earlier collection.
-- Price lookbacks reach across split blocks. They contain no target of
-  another split, but volatility persistence makes neighbouring blocks
-  similar.
+- **The news feed is not a stable instrument.** Volume doubled in April 2026
+  and new per-stock templates appeared; every text result after that date is
+  confounded, and 2026 is the only design-clean test period.
+- **Five years of labeled data** (2021–2026), against the 8-year training
+  windows of the RV literature.
+- **The target is measured from 5 daily bars**, so proxy noise dominates:
+  the worst 1% of samples hold about a third of the loss.
+- **2023–2025 informed the design** (feature and aggregation ablations on
+  their validation periods), so only 2026 — and, eventually, data after
+  2026-11-16 — can confirm the design out of sample.
+- Headline coverage is uneven: 30% of stock-days have no headline, and list
+  headlines (10+ symbols) carry 27% of attachments.

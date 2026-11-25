@@ -1,6 +1,6 @@
 """End-to-end on a synthetic market, plus the properties the results rest on:
-point in time, one-day slide, the Yang–Zhang target by hand, leak-free
-blocked splits, exact data-hygiene rules, train-only control content."""
+point in time, one-day slide, target and inputs by hand, forward-in-time
+purged folds, exact data-hygiene rules, a forecast of a window not yet seen."""
 import datetime as dt
 import pathlib
 
@@ -61,9 +61,7 @@ def world(tmp_path_factory):
     cfg = {"BARS_PATH": str(tmp / "bars.parquet"), "NEWS_PATH": str(tmp / "news.parquet"),
            "EMB_PREFIX": str(tmp / "emb_s"), "DATASET": str(tmp / "ds.pt"),
            "STATE_DIR": str(tmp), "WINDOW": str(W), "SAMPLE_START": "2023-01-02",
-           "BLOCK": "21", "VAL_FRACTION": "0.15", "TEST_FRACTION": "0.15",
-           "SPLITS": "3", "TARGET": "AAA", "VAL_START": "2024-07-01",
-           "TEST_START": "2025-01-01"}
+           "FOLDS": "2024-01-01,2024-07-01,2025-01-01"}
     return cfg, dataset.build(cfg), bars, news, days
 
 
@@ -104,24 +102,50 @@ def test_window_slides_one_day_and_quiet_windows_exist(world):
     assert ((ds["hi"] - ds["lo"]).numpy() == 0).any()     # BBB never has news
 
 
-def test_target_is_yang_zhang_by_hand(world):
-    _, ds, bars, _, days = world
-    i = _row(ds, "AAA", "2024-06-03")
-    t = int(ds["t"][i])
-    po, ph, pl, pc = (np.array(bars[k][:len(days)]) for k in ("open", "high", "low", "close"))
+def test_target_and_inputs_by_hand(world):
+    _, ds, bars, news, days = world
+    n = len(days)
+    po, ph, pl, pc = (np.array(bars[k][:n]) for k in ("open", "high", "low", "close"))
+    col = ds["config"]["ctx"].index
 
     def yz(a, b):                                   # days a..b inclusive
         o = np.log(po[a:b + 1] / pc[a - 1:b])
         c = np.log(pc[a:b + 1] / po[a:b + 1])
         u, d = np.log(ph[a:b + 1] / po[a:b + 1]), np.log(pl[a:b + 1] / po[a:b + 1])
-        n = b - a + 1
-        k = 0.34 / (1.34 + (n + 1) / (n - 1))
+        m = b - a + 1
+        k = 0.34 / (1.34 + (m + 1) / (m - 1))
         rs = np.mean(u * (u - c) + d * (d - c))
         return 252 * (np.var(o, ddof=1) + k * np.var(c, ddof=1) + (1 - k) * rs)
 
+    i = _row(ds, "AAA", "2024-06-03")
+    t, x = int(ds["t"][i]), ds["ctx"][i].numpy().astype(np.float64)
     assert np.exp(float(ds["y"][i])) == pytest.approx(yz(t + 1, t + W), rel=1e-5)
     assert np.exp(float(ds["prev"][i])) == pytest.approx(yz(t - W + 1, t), rel=1e-5)
-    assert np.exp(float(ds["ctx"][i, 1])) == pytest.approx(yz(t - 21, t), rel=1e-5)
+    assert np.exp(x[col("logvar22")]) == pytest.approx(yz(t - 21, t), rel=1e-5)
+    o, c = np.log(po[t] / pc[t - 1]), np.log(pc[t] / po[t])
+    u, d = np.log(ph[t] / po[t]), np.log(pl[t] / po[t])
+    assert np.exp(x[col("logvar1")]) == pytest.approx(
+        252 * (o * o + u * (u - c) + d * (d - c)), rel=1e-5)
+    assert x[col("negret5")] == pytest.approx(min(np.log(pc[t] / pc[t - 5]), 0.0), abs=1e-6)
+    # news of session t, relative to the symbol's own 132-session norm
+    per_day = np.bincount(ds["att_info"].numpy()[:len(news["headline"])], minlength=n)
+    assert x[col("news_last")] == pytest.approx(
+        np.log1p(per_day[t]) - np.log1p(per_day[t - 131:t + 1].sum() / 132), abs=1e-6)
+
+
+def test_live_rows_are_the_latest_close(world):
+    """The forecast inputs: one row per symbol at the last session, built from
+    the same formulas, with no target (its window has not happened)."""
+    _, ds, _, _, days = world
+    live, n = ds["live"], len(days)
+    assert set(live["sym"].tolist()) == {0, 1}
+    assert (live["t"].numpy() == n - 1).all()
+    assert (live["day"].numpy() == np.datetime64(days[-1].isoformat()).astype(np.int64)).all()
+    assert "y" not in live and int(ds["t"].max()) == n - 1 - W
+    last = _row(ds, "AAA", days[-1 - W].isoformat())             # the newest sample with a target
+    a = int(np.where(live["sym"].numpy() == 0)[0][0])
+    assert int(live["hi"][a]) >= int(ds["hi"][last])              # windows keep sliding forward
+    assert int(live["hi"][a]) - int(live["lo"][a]) >= 0
 
 
 def test_sample_start_and_bad_bars(world):
@@ -133,20 +157,25 @@ def test_sample_start_and_bad_bars(world):
     assert not ((d > bad - 7) & (d < bad + 150)).any(), "inconsistent bar inside a span"
 
 
-def test_blocked_split_shares_nothing_across_splits(world):
-    _, ds, _, _, _ = world
-    pos = ds["pos"].numpy()
-    a = dataset.blocked_split(ds, 0, 21, 0.15, 0.15)
-    b = dataset.blocked_split(ds, 1, 21, 0.15, 0.15)
-    assert {0, 1, 2} <= set(a) and not np.array_equal(a, b)
-    by_pos = {}
-    for p, s in zip(pos, a, strict=True):
-        if s >= 0:
-            by_pos[p] = s
-    for p, s in zip(pos, a, strict=True):                # whole span in one split
-        if s >= 0:
-            for q in range(p - W + 1, p + W + 1):
-                assert by_pos.get(q, s) == s
+def test_folds_run_forward_in_time_and_are_purged(world):
+    """Train < validation < test by date in every fold, and no sample's span
+    (headline window .. target window) crosses out of its part."""
+    cfg, ds, _, _, _ = world
+    pos, day = ds["pos"].numpy(), ds["day"].numpy()
+    cuts = [np.datetime64(d).astype(np.int64) for d in cfg["FOLDS"].split(",")]
+    cal = ds["calendar"].numpy()
+    for k in range(train.n_folds(cfg)):
+        split = dataset.fold_split(ds, k, cfg["FOLDS"])
+        tr, va, te = (np.where(split == i)[0] for i in range(3))
+        assert len(tr) and len(va) and len(te)
+        assert day[tr].max() < day[va].min() <= day[va].max() < day[te].min()
+        assert cal[pos[tr] + W].max() < cuts[k]                    # train targets end first
+        assert cal[pos[va] - W + 1].min() >= cuts[k] and cal[pos[va] + W].max() < cuts[k + 1]
+        assert cal[pos[te] - W + 1].min() >= cuts[k + 1]
+        if k + 2 < len(cuts):
+            assert cal[pos[te] + W].max() < cuts[k + 2]
+    with pytest.raises(ValueError):
+        dataset.fold_split(ds, 0, "2025-01-01,2024-01-01")
 
 
 def test_window_means_equal_projected_window_mean(world):
@@ -154,23 +183,41 @@ def test_window_means_equal_projected_window_mean(world):
     _, ds, _, _, _ = world
     E = ds["emb"].numpy().astype(np.float64)
     V = np.random.default_rng(0).normal(size=(768, 3))
-    got = train.window_means(ds, E[ds["att_emb"].numpy()] @ V)
-    i = int(np.argmax((ds["hi"] - ds["lo"]).numpy()))
-    lo, hi = int(ds["lo"][i]), int(ds["hi"][i])
+    lo_, mid_, hi_ = (ds[k].numpy() for k in ("lo", "mid", "hi"))
+    got = train.window_means(E[ds["att_emb"].numpy()] @ V, lo_, hi_)
+    i = int(np.argmax(hi_ - lo_))
+    lo, hi = int(lo_[i]), int(hi_[i])
     assert np.allclose(got[i], E[ds["att_emb"][lo:hi].numpy()].mean(0) @ V)
-    assert (got[(ds["hi"] == ds["lo"]).numpy()] == 0).all()
+    assert (got[hi_ == lo_] == 0).all()
+    # the window splits into its last session and the sessions before it
+    assert ((lo_ <= mid_) & (mid_ <= hi_)).all()
+    info, t = ds["att_info"].numpy(), ds["t"].numpy()
+    for i in range(0, len(t), 17):
+        assert (info[mid_[i]:hi_[i]] == t[i]).all() and (info[lo_[i]:mid_[i]] < t[i]).all()
+
+
+def test_day_relative_removes_what_a_day_shares():
+    """Add one vector to every headline-bearing row of a day: nothing changes."""
+    rng = np.random.default_rng(0)
+    day, full = np.repeat(np.arange(6), 5), rng.random(30) < 0.7
+    T = np.where(full[:, None], rng.normal(size=(30, 3)), 0.0)
+    shifted = T + np.where(full[:, None], rng.normal(size=(6, 3))[day], 0.0)
+    train.day_relative(T, day, full)
+    train.day_relative(shifted, day, full)
+    assert np.allclose(T, shifted) and (T[~full] == 0).all()
+    assert np.allclose([T[full & (day == d)].sum(0) for d in range(6)], 0.0)
 
 
 def test_fit_and_evaluate_end_to_end(world):
     cfg, *_ = world
-    cfg = cfg | {"SPLITS": "3"}
     train.run(cfg)
     rep = evaluate.main(cfg)
-    for scope in ("universe", "AAA"):
-        r = rep[scope]
-        assert set(r["qlike"]) == {"persistence", "HAR", "intensity", "shuffled", "text"}
-        assert r["n_splits"] == 3
-        assert all(np.isfinite(list(s["qlike"].values())).all() for s in r["splits"])
+    arms = {"persistence", "HAR", "price", "intensity", "shuffled", "text"}
+    assert len(rep["folds"]) == 2 and rep["folds"][0]["to"] < rep["folds"][1]["from"]
+    for r in (*rep["folds"], rep["all"]):
+        assert set(r["qlike"]) == arms and np.isfinite(list(r["qlike"].values())).all()
+        assert np.isfinite(list(r["dm_t"].values())).all()
+    assert rep["all"]["samples"] == sum(f["samples"] for f in rep["folds"])
 
 
 def test_build_refuses_duplicate_bars(world):
@@ -182,80 +229,14 @@ def test_build_refuses_duplicate_bars(world):
         dataset.build(cfg | {"BARS_PATH": cfg["BARS_PATH"] + ".dup"})
 
 
-def test_forecast_writes_one_row_per_symbol(world):
-    """The deliverable: one predicted vol per symbol as of its last session,
-    positive and finite, sorted worst-first in the CSV."""
-    cfg, ds, _, _, _ = world
+def test_forecast_is_for_a_window_not_yet_seen(world):
+    """One predicted vol per symbol from its inputs at the latest close."""
+    cfg, _, _, _, days = world
     out = train.forecast(cfg)
     assert set(out["symbols"]) == {"AAA", "BBB"}
+    assert set(out["day"]) == {days[-1].isoformat()}              # the last bar, not W before
     assert all(np.isfinite(out["vol"])) and all(v > 0 for v in out["vol"])
     lines = (pathlib.Path(cfg["STATE_DIR"]) / "forecast.csv").read_text().splitlines()
     assert lines[0] == "symbol,day,predicted_vol_pct,previous_window_vol_pct"
-    assert len(lines) == len(ds["symbols"]) + 1
     vols = [float(row.split(",")[2]) for row in lines[1:]]
-    assert vols == sorted(vols, reverse=True)
-
-
-def test_fixed_effects_remove_the_symbol_level():
-    """Shift y and every feature of a symbol by a constant: the fitted deviations
-    must not move, because that constant is exactly what the level absorbs."""
-    rng = np.random.default_rng(0)
-    n_sym, per = 4, 60
-    sym = np.repeat(np.arange(n_sym), per)
-    tr = np.arange(n_sym * per)
-    X = rng.normal(size=(len(sym), 2)) + rng.normal(0, 2, n_sym)[sym][:, None]
-    y = rng.normal(3, 1, n_sym)[sym] + X @ np.array([0.5, -0.3]) + rng.normal(0, 0.4, len(sym))
-
-    def fit(X, y):
-        Xd = train.centre(X.copy(), train.means(X, sym, n_sym), sym)
-        yd = y - train.levels(y, sym, tr, n_sym)[sym]
-        return train.fit_qlike(np.c_[np.ones(len(sym)), Xd], yd)
-
-    c = rng.normal(0, 3, n_sym)                     # a different constant per stock
-    assert np.allclose(fit(X, y), fit(X + c[sym][:, None], y + c[sym]), atol=1e-8)
-
-
-def test_level_is_the_qlike_optimal_location():
-    """The per-symbol level is the minimiser of the loss, not the mean of y."""
-    y = np.random.default_rng(1).normal(3, 1, 200)
-    lev = train.levels(y, np.zeros(200, int), np.arange(200), 1)[0]
-    grid = lev + np.linspace(-2, 2, 401)
-    losses = [train.qlike(np.full(200, g), y).mean() for g in grid]
-    assert np.argmin(losses) == 200                 # lev is the centre of the grid
-    assert abs(lev - y.mean()) > 0.05               # not the mean of log variance
-
-
-def test_levels_and_means_fall_back_when_a_symbol_is_absent():
-    sym = np.array([0, 0, 0, 1])
-    y = np.log(np.array([1.0, 4.0, 9.0, 100.0]))
-    X = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
-    tr = np.array([0, 1, 2])                        # symbol 1 is missing from train
-    lev = train.levels(y, sym, tr, 2)
-    M = train.means(X[tr], sym[tr], 2)
-    assert np.isclose(lev[0], np.log(np.mean(np.exp(y[[0, 1, 2]]))))
-    assert np.isclose(lev[1], np.log(np.mean(np.exp(y[[0, 1, 2]]))))
-    assert np.allclose(M[0], X[[0, 1, 2]].mean(0))
-    assert np.allclose(M[1], X[[0, 1, 2]].mean(0))
-
-
-
-def test_time_split_is_forward_in_time_and_purged(world):
-    """Train < val < test by date, and no train sample's target window may reach
-    a test session (nor a test sample's headline window reach training)."""
-    cfg, ds, _, _, _ = world
-    split = dataset.time_split(ds, cfg)
-    day = ds["day"].numpy()
-    t, val, test = (day[split == i] for i in range(3))
-    assert t.min() < t.max() < val.min() and val.max() < test.min()
-    assert test.min() >= np.datetime64("2025-01-01").astype(np.int64)
-    assert val.min() >= np.datetime64("2024-07-01").astype(np.int64)
-    pos = ds["pos"].numpy()
-    cal = np.unique(pq.read_table(cfg["BARS_PATH"], columns=["day"])["day"]
-                    .cast(pa.date32()).to_numpy().astype("datetime64[D]").astype(np.int64))
-    seg = np.where(cal < np.datetime64("2024-07-01").astype(np.int64), 0,
-                   np.where(cal < np.datetime64("2025-01-01").astype(np.int64), 1, 2))
-    for k in range(3):
-        # the sample's whole span: first session of the headline window ..
-        # last session of the target window
-        assert (seg[pos[split == k] - W + 1] == k).all()
-        assert (seg[pos[split == k] + W] == k).all()
+    assert len(vols) == 2 and vols == sorted(vols, reverse=True)

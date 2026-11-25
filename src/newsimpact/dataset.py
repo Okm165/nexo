@@ -5,13 +5,19 @@ The window slides ONE session at a time. For every day t:
     target  log annualized Yang–Zhang variance of the NEXT W sessions
             (t+1 .. t+W), from daily open/high/low/close
     input   everything known at the close of t:
-            * the symbol's headlines from the last W sessions, each with its
-              age in sessions (possibly none — the model has a "no news" token)
-            * own log Yang–Zhang variance over the last 5, 22, 66, 132 sessions
-            * news intensity: log(1 + headlines in the window) minus
-              log(1 + the window-length share of the last 132 sessions'
-              headlines) — attention relative to the symbol's own recent norm,
-              so a vendor covering more over the years is not "more news"
+            * the symbol's headlines from the last W sessions, split into
+              those of session t and those of the W-1 sessions before
+              (either part may be empty)
+            * own log variance over the last 1, 5, 22, 66, 132 sessions:
+              Yang–Zhang, and o² + rs for the single session
+            * leverage: the negative part of the 1-, 5-, 22-session log return
+            * news intensity of session t: log(1 + its headlines) minus
+              log(1 + the symbol's mean headlines per session over the last
+              132) — attention relative to the symbol's own recent norm, so
+              a vendor covering more over the years is not "more news"
+
+The same inputs are also built for the latest close in the data, whose target
+window has not happened yet: those rows (`live`) are what `forecast` predicts.
 
 Yang–Zhang (2000), for the n days of a window:
     o = ln(O_i / C_{i-1})   overnight      c = ln(C_i / O_i)   open-to-close
@@ -27,13 +33,14 @@ hour early in winter, so the rule can only be conservative).
 Data hygiene, exact rules:
   * a bar is valid only if 0 < low ≤ min(open, close) ≤ max(open, close) ≤ high
   * every session of [t-132, t+W] must be present on the market calendar and
-    valid, with no |log close-to-close| > 1 (an unadjusted split)
+    valid, with no |log close-to-close| > 1 (an unadjusted split); for the
+    latest close, every session of [t-132, t]
   * every variance used must be > 0 (zero means the price did not trade)
   * samples start at SAMPLE_START, where the news archive's coverage begins:
     before it an empty window means "not collected", not "no news". Earlier
     bars still serve as price history.
 
-The dataset is split-free; `blocked_split` assigns samples (see there).
+The dataset is split-free; `fold_split` assigns samples (see there).
 Nothing here is fitted to data, so nothing here can leak.
 """
 from __future__ import annotations
@@ -48,10 +55,11 @@ import pyarrow.parquet as pq
 import torch
 
 CLOSE_UTC_HOUR = 20
-LOOKBACKS = (5, 22, 66, 132)        # sessions
+LOOKBACKS = (5, 22, 66, 132)        # sessions (Yang–Zhang); the single session is separate
+RETURNS = (1, 5, 22)                # sessions, for the leverage terms
 MAX_ABS_LOGRET = 1.0
-CTX = (*(f"logvar{k}" for k in LOOKBACKS), "news_intensity")
-N_PRICE = len(LOOKBACKS)            # the first columns carry no news information
+CTX = ("logvar1", *(f"logvar{k}" for k in LOOKBACKS), *(f"negret{k}" for k in RETURNS),
+       "news_last")
 
 
 def _windowed(x: np.ndarray, end: np.ndarray, n: int):
@@ -74,51 +82,31 @@ def yang_zhang(o: np.ndarray, c: np.ndarray, rs: np.ndarray, end: np.ndarray,
     return 252.0 * (var_o + k * var_c + (1 - k) * srs / n)
 
 
-def blocked_split(ds: dict, seed: int, block: int, val_frac: float,
-                  test_frac: float) -> np.ndarray:
-    """Purged blocked random split: 0 train / 1 val / 2 test / -1 dropped.
+def fold_split(ds: dict, k: int, folds: str) -> np.ndarray:
+    """Walk-forward fold k: 0 train / 1 validation / 2 test / -1 unused.
 
-    The market calendar is cut into consecutive blocks of `block` sessions,
-    and blocks — not days — are assigned to train/val/test uniformly at
-    random, so every split samples every market regime. A sample is kept only
-    if its whole span, from the first session of its headline window to the
-    last session of its target window, lies in blocks of ONE split: no target
-    session and no headline is shared across splits. (Price lookbacks reach
-    further back; they carry no target of another split.)
+    `folds` is a comma list of increasing dates that cut the calendar into
+    segments. Fold k validates on the segment starting at date k, tests on the
+    next one, and trains on everything before date k — always forward in
+    time, as the forecast is used. Purged: a sample is in a part only if its
+    whole span, from the first session of its headline window to the last
+    session of its target window, lies inside it, so no target session and no
+    headline is shared between train, validation and test.
     """
     W = ds["config"]["WINDOW"]
-    pos = ds["pos"].numpy() - int(ds["pos"].min()) + W     # blocks tile the sampled span
-    n_blocks = (int(pos.max()) + W) // block + 1
-    rng = np.random.default_rng(seed)
-    order = rng.permutation(n_blocks)
-    n_te, n_va = round(test_frac * n_blocks), round(val_frac * n_blocks)
-    assign = np.zeros(n_blocks, np.int8)
-    assign[order[:n_te]] = 2
-    assign[order[n_te:n_te + n_va]] = 1
-    first, last = assign[(pos - W + 1) // block], assign[(pos + W) // block]
-    return np.where(first == last, assign[pos // block], -1).astype(np.int8)
-
-
-def time_split(ds: dict, cfg: dict) -> np.ndarray:
-    """Time-ordered split: 0 train < VAL_START ≤ 1 validation < TEST_START ≤ 2 test.
-
-    Purged exactly as `blocked_split` purges: a sample is kept only if its
-    whole span, from the first session of its headline window to the last
-    session of its target window, lies in one segment. So no train sample's
-    target reaches the test period and no test sample's headlines reach the
-    training period — at least W sessions of gap on each side. Unlike the
-    random splits, this one is a single forward-in-time draw, so it can be
-    read once as a clean check on the repeated random splits.
-    """
-    W = int(ds["config"]["WINDOW"])
-    day = pq.read_table(cfg["BARS_PATH"], columns=["day"])["day"]
-    cal = np.unique(day.cast(pa.date32()).to_numpy().astype("datetime64[D]").astype(np.int64))
-    val_start = np.datetime64(cfg["VAL_START"]).astype(np.int64)
-    test_start = np.datetime64(cfg["TEST_START"]).astype(np.int64)
-    seg = np.where(cal < val_start, 0, np.where(cal < test_start, 1, 2)).astype(np.int8)
+    b = np.array(folds.split(","), "datetime64[D]").astype(np.int64)
+    if len(b) < 2 or (np.diff(b) <= 0).any():
+        raise ValueError("FOLDS: need at least two increasing dates")
+    if not 0 <= k < len(b) - 1:
+        raise ValueError(f"fold {k}: FOLDS defines folds 0..{len(b) - 2}")
+    seg = np.searchsorted(b, ds["calendar"].numpy(), side="right")   # 0 = before the first date
     pos = ds["pos"].numpy()
     first, last = seg[pos - W + 1], seg[pos + W]
-    return np.where(first == last, seg[pos], -1).astype(np.int8)
+    out = np.full(len(pos), -1, np.int8)
+    out[last <= k] = 0
+    out[(first == k + 1) & (last == k + 1)] = 1
+    out[(first == k + 2) & (last == k + 2)] = 2
+    return out
 
 
 def _bars(path: str):
@@ -198,7 +186,8 @@ def build(cfg: dict) -> dict:
     E, a_sym, a_pub, a_emb = _attachments(cfg, {s: i for i, s in enumerate(symbols)})
     a_bounds = np.searchsorted(a_sym, np.arange(len(symbols) + 1))
 
-    cols = {k: [] for k in ("sym", "t", "pos", "day", "lo", "hi", "own", "news", "y", "prev")}
+    keys = ("sym", "t", "pos", "day", "lo", "mid", "hi", "day1", "own", "neg", "news", "prev")
+    cols, live = {k: [] for k in (*keys, "y")}, {k: [] for k in keys}
     att_emb, att_info, n_att = [], [], 0
     for c in range(len(symbols)):
         d, bars = day[bounds[c]:bounds[c + 1]], ohlc[bounds[c]:bounds[c + 1]]
@@ -209,6 +198,7 @@ def build(cfg: dict) -> dict:
         info = info[keep]
         att_emb.append(a_emb[a_bounds[c]:a_bounds[c + 1]][keep])
         att_info.append(info)
+        first_att, n_att = n_att, n_att + len(info)
 
         p_open, p_high, p_low, p_close = bars.T
         valid = ((p_low > 0) & (p_low <= np.minimum(p_open, p_close))
@@ -224,44 +214,68 @@ def build(cfg: dict) -> dict:
         bad = np.concatenate([[0], np.cumsum(~ok_day)])
         pos = np.searchsorted(calendar, d)
 
-        t = np.arange(L, n - W)
+        t = np.arange(L, n)                                # every day with a full lookback
         if len(t) == 0:
-            n_att += len(info)
             continue
-        clean = (bad[t + W + 1] - bad[t - L + 1] == 0) & (pos[t + W] - pos[t - L] == L + W)
         own = np.stack([yang_zhang(o, cc, rs, t, k) for k in LOOKBACKS], 1)
-        y = yang_zhang(o, cc, rs, t + W, W)
+        day1 = 252.0 * (o[t] ** 2 + rs[t])                 # session t alone
         prev = yang_zhang(o, cc, rs, t, W)
+        # inputs are known at the close of t: [t-L, t] is on the calendar and
+        # valid, and every variance is positive
+        known = ((bad[t + 1] - bad[t - L + 1] == 0) & (pos[t] - pos[t - L] == L)
+                 & (own > 0).all(1) & (day1 > 0) & (prev > 0))
         daily = np.bincount(info, minlength=n).astype(np.float64)
         cum = np.concatenate([[0.0], np.cumsum(daily)])
-        n_win = cum[t + 1] - cum[t + 1 - W]
-        base = (cum[t + 1] - cum[t + 1 - L]) * W / L
-        m = clean & (own > 0).all(1) & (y > 0) & (prev > 0) & (d[t] >= first_day)
-        lo = np.searchsorted(info, t - W + 1, side="left")
-        hi = np.searchsorted(info, t, side="right")
-        for k, v in (("sym", np.full(len(t), c, np.int32)), ("t", t), ("pos", pos[t]),
-                     ("day", d[t]), ("lo", lo + n_att), ("hi", hi + n_att),
-                     ("news", np.log1p(n_win) - np.log1p(base))):
-            cols[k].append(v[m])
-        for k, v in (("own", own), ("y", y), ("prev", prev)):       # positive after masking
-            cols[k].append(np.log(v[m]))
-        n_att += len(info)
+        norm = (cum[t + 1] - cum[t + 1 - L]) / L           # own headlines per session
+        safe = known[:, None]
+        feat = {
+            "sym": np.full(len(t), c, np.int32), "t": t, "pos": pos[t], "day": d[t],
+            "lo": np.searchsorted(info, t - W + 1, side="left") + first_att,
+            "mid": np.searchsorted(info, t, side="left") + first_att,   # first of session t
+            "hi": np.searchsorted(info, t, side="right") + first_att,
+            "day1": np.log(np.where(known, day1, 1.0)), "own": np.log(np.where(safe, own, 1.0)),
+            "prev": np.log(np.where(known, prev, 1.0)),
+            "neg": np.stack([np.minimum(logc[t] - logc[t - k], 0.0) for k in RETURNS], 1),
+            "news": np.log1p(daily[t]) - np.log1p(norm),   # session t vs the symbol's norm
+        }
+        if known[-1] and d[-1] == calendar[-1]:            # the latest close: no target yet
+            for k, v in feat.items():
+                live[k].append(v[-1:])
+        tl = t[:max(len(t) - W, 0)]                        # days whose target window exists
+        y = yang_zhang(o, cc, rs, tl + W, W)
+        m = (known[:len(tl)] & (bad[tl + W + 1] - bad[tl + 1] == 0)
+             & (pos[tl + W] - pos[tl] == W) & (y > 0) & (d[tl] >= first_day))
+        for k, v in feat.items():
+            cols[k].append(v[:len(tl)][m])
+        cols["y"].append(np.log(y[m]))
 
-    s = {k: np.concatenate(v) for k, v in cols.items()}
-    if not len(s["y"]):
+    if not cols["y"] or not sum(map(len, cols["y"])):
         raise ValueError("no samples — check BARS_PATH coverage against the lookbacks")
-    s["ctx"] = np.c_[s.pop("own"), s.pop("news")].astype(np.float32)
-    s["y"], s["prev"] = s["y"].astype(np.float32), s["prev"].astype(np.float32)
+    if not live["sym"]:
+        raise ValueError("no symbol has valid inputs at the last session of BARS_PATH")
+
+    def table(c: dict) -> dict:
+        s = {k: np.concatenate(v) for k, v in c.items()}
+        s["ctx"] = np.c_[s.pop("day1"), s.pop("own"), s.pop("neg"),
+                         s.pop("news")].astype(np.float32)
+        s["prev"] = s["prev"].astype(np.float32)
+        return s
+
+    s, live = table(cols), table(live)
+    s["y"] = s["y"].astype(np.float32)
 
     att_emb, att_info = map(np.concatenate, (att_emb, att_info))
     used, att_emb = np.unique(att_emb, return_inverse=True)
-    digest = _digest([s["sym"], s["t"], s["pos"], s["day"], s["lo"], s["hi"],
-                      s["y"], s["prev"], s["ctx"], att_emb, att_info, E])
+    digest = _digest([s["sym"], s["t"], s["pos"], s["day"], s["lo"], s["mid"], s["hi"],
+                      s["y"], s["prev"], s["ctx"], att_emb, att_info, E, calendar,
+                      *(live[k] for k in ("sym", "day", "lo", "mid", "hi", "prev", "ctx"))])
     ds = {
         "config": {"WINDOW": W, "SAMPLE_START": cfg["SAMPLE_START"],
                    "LOOKBACKS": list(LOOKBACKS), "ctx": list(CTX),
-                   "n_price": N_PRICE, "close_utc_hour": CLOSE_UTC_HOUR},
+                   "close_utc_hour": CLOSE_UTC_HOUR},
         "digest": digest, "symbols": list(symbols),
+        "calendar": torch.from_numpy(calendar),
+        "live": {k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in live.items()},
         "emb": torch.from_numpy(E[used]),                       # raw float32
         "att_emb": torch.from_numpy(att_emb.astype(np.int64)),
         "att_info": torch.from_numpy(att_info.astype(np.int64)),
@@ -284,12 +298,14 @@ def _summary(ds: dict) -> None:
           f"p50={np.median(n):.0f} p95={np.percentile(n, 95):.0f} none={np.mean(n == 0):.1%}  "
           f"next-window vol p50={np.median(vol):.1f}%")
     print(f"{len(ds['emb']):,} headlines, {len(ds['att_emb']):,} attachments, "
+          f"{len(ds['live']['sym']):,} symbols with inputs at the last close, "
           f"digest {ds['digest']}")
 
 
 def load(path: str) -> dict:
     ds = torch.load(path, weights_only=False, map_location="cpu")
-    for k in ("emb", "att_emb", "att_info", "lo", "hi", "t", "pos", "day", "ctx", "y", "prev"):
+    for k in ("emb", "att_emb", "att_info", "lo", "mid", "hi", "t", "pos", "day", "ctx", "y",
+              "prev", "calendar", "live"):
         if k not in ds:
             raise ValueError(f"{path}: missing {k} — rebuild with `newsimpact build`")
     if not torch.isfinite(ds["y"]).all() or not torch.isfinite(ds["ctx"]).all():

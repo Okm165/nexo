@@ -1,110 +1,92 @@
-"""Score every arm on every split's test samples.
+"""Score every arm on every walk-forward fold's test period.
 
-Primary metric QLIKE (robust to the noisy variance proxy); also skill vs HAR
-(1 − QLIKE/QLIKE_HAR) and rank correlation — for the whole universe and for
-TARGET, from the same pooled fits. Each split gets Diebold–Mariano
-tests; the summary is mean ± sd across splits and the number of splits in
-which the first forecast is better — no conclusion rests on one draw of
-test months.
+Metric: QLIKE (robust to the noisy variance proxy), and skill vs HAR
+(1 − QLIKE/QLIKE_HAR). Every comparison gets a Diebold–Mariano test on the
+daily mean loss difference, per test period and over all test days together;
+the per-period results show whether a pooled result holds in each year or
+comes from one of them.
 """
 from __future__ import annotations
 
-import glob
 import json
-import os
 from pathlib import Path
 
 import numpy as np
 
 from newsimpact.dataset import load
-from newsimpact.metrics import diebold_mariano, spearman
+from newsimpact.metrics import diebold_mariano
 from newsimpact.model import qlike
 from newsimpact.train import ARMS
 
 NAMES = ("persistence", *ARMS)
-PAIRS = (("text", "shuffled"), ("text", "intensity"), ("text", "HAR"),
-         ("intensity", "HAR"), ("HAR", "persistence"))
+PAIRS = (("HAR", "persistence"), ("price", "HAR"), ("intensity", "price"),
+         ("text", "intensity"), ("text", "shuffled"))
+
+
+def _score(loss: dict, pos: np.ndarray, group: np.ndarray, lag: int) -> dict:
+    q = {n: float(loss[n].mean()) for n in NAMES}
+    return {"samples": len(pos), "days": len(np.unique(pos)), "qlike": q,
+            "skill_vs_har": {n: 1 - q[n] / q["HAR"] for n in NAMES},
+            "dm_t": {f"{a} vs {b}": diebold_mariano(loss[a], loss[b], pos, group, lag)[1]
+                     for a, b in PAIRS}}
 
 
 def main(cfg: dict) -> dict:
     ds = load(cfg["DATASET"])
-    W, pos_all = int(ds["config"]["WINDOW"]), ds["pos"].numpy()
-    y_all, sym_all = ds["y"].numpy().astype(np.float64), ds["sym"].numpy()
-    target = cfg["TARGET"]
-    target_code = ds["symbols"].index(target) if target in ds["symbols"] else -1
-    splits: dict[str, list] = {"universe": [], target: []}
-    files = glob.glob(os.path.join(cfg["STATE_DIR"], "runs", "split*.json"))
-    for f in sorted(files, key=lambda f: int(Path(f).stem[5:])):
-        meta = json.loads(Path(f).read_text())
+    W = int(ds["config"]["WINDOW"])
+    y_all, pos_all = ds["y"].numpy().astype(np.float64), ds["pos"].numpy()
+    day_all = ds["day"].numpy().astype("datetime64[D]")
+    files = sorted((Path(cfg["STATE_DIR"]) / "runs").glob("fold*.json"),
+                   key=lambda f: int(f.stem[4:]))
+    if not files:
+        raise SystemExit("no fitted folds — run `newsimpact train`")
+    folds, parts = [], []
+    for f in files:
+        meta = json.loads(f.read_text())
         if meta["digest"] != ds["digest"]:
             raise SystemExit(f"{f}: fitted on a different dataset — rerun `newsimpact train`")
-        z = np.load(f[:-5] + ".npz")
-        for scope, m in (("universe", np.ones(len(z["idx"]), bool)),
-                         (target, sym_all[z["idx"]] == target_code)):
-            if not m.any():
-                continue
-            idx = z["idx"][m]
-            y, pos = y_all[idx], pos_all[idx]
-            loss = {n: qlike(z[n][m], y) for n in NAMES}
-            splits[scope].append({
-                "split": meta["split"], "test_samples": len(y), "selection": meta["selection"],
-                "qlike": {n: float(loss[n].mean()) for n in NAMES},
-                "skill_vs_har": {n: 1 - float(loss[n].mean() / loss["HAR"].mean())
-                                 for n in NAMES},
-                "spearman": {n: spearman(z[n][m], y) for n in NAMES},
-                "dm_t": {f"{a} vs {b}": diebold_mariano(loss[a], loss[b], pos,
-                                                        pos // int(cfg["BLOCK"]), W - 1)[1]
-                         for a, b in PAIRS},
-                "h": z["text"][m], "y": y})
-    if not splits["universe"]:
-        raise SystemExit("no fitted splits — run `newsimpact train`")
-    rep = {"window": W, "digest": ds["digest"],
-           **{scope: _report(ss) for scope, ss in splits.items() if ss}}
-    for scope in (target, "universe"):
-        if scope in rep:
-            _print(scope, rep[scope], W)
-    out = os.path.join(cfg["STATE_DIR"], "eval.json")
-    Path(out).write_text(json.dumps(rep, indent=1))
+        z = np.load(f.with_suffix(".npz"))
+        idx = z["idx"]
+        loss = {n: qlike(z[n], y_all[idx]) for n in NAMES}
+        group = np.full(len(idx), meta["fold"])
+        folds.append({"fold": meta["fold"], "from": str(day_all[idx].min()),
+                      "to": str(day_all[idx].max()), "selection": meta["selection"],
+                      "val_qlike": meta["val"], **_score(loss, pos_all[idx], group, W - 1)})
+        parts.append((loss, pos_all[idx], group, z["text"], y_all[idx]))
+    loss = {n: np.concatenate([p[0][n] for p in parts]) for n in NAMES}
+    pos, group, h, y = (np.concatenate([p[i] for p in parts]) for i in range(1, 5))
+    dec = np.clip(np.searchsorted(np.quantile(h, np.linspace(0, 1, 11)), h, "right") - 1, 0, 9)
+
+    def vol(v):                             # mean variance of a decile, shown as vol %
+        return float(np.sqrt(np.exp(v).mean()) * 100)
+
+    rep = {"window": W, "digest": ds["digest"], "folds": folds,
+           "all": _score(loss, pos, group, W - 1),
+           "calibration_text": [{"decile": i + 1, "pred_vol_pct": vol(h[dec == i]),
+                                 "realized_vol_pct": vol(y[dec == i])} for i in range(10)]}
+    _print(rep)
+    out = Path(cfg["STATE_DIR"]) / "eval.json"
+    out.write_text(json.dumps(rep, indent=1))
     print(f"-> {out}")
     return rep
 
 
-def _report(splits: list) -> dict:
-    def agg(key):
-        return {n: (float(np.mean([s[key][n] for s in splits])),
-                    float(np.std([s[key][n] for s in splits], ddof=1)) if len(splits) > 1
-                    else 0.0) for n in splits[0][key]}
-
-    def vol(v):                             # mean variance per decile, shown as vol %
-        return float(np.sqrt(np.exp(v).mean()) * 100)
-
-    h = np.concatenate([s["h"] for s in splits])
-    y = np.concatenate([s["y"] for s in splits])
-    dec = np.clip(np.searchsorted(np.quantile(h, np.linspace(0, 1, 11)), h, "right") - 1, 0, 9)
-    return {"n_splits": len(splits), "test_samples": [s["test_samples"] for s in splits],
-            "qlike": agg("qlike"), "skill_vs_har": agg("skill_vs_har"),
-            "spearman": agg("spearman"), "dm_t": agg("dm_t"),
-            "first_better": {p: int(sum(s["dm_t"][p] < 0 for s in splits))
-                             for p in splits[0]["dm_t"]},
-            "selected_pcs": [s["selection"]["text"]["pcs"] for s in splits],
-            "selected_ridge": [s["selection"]["text"]["ridge"] for s in splits],
-            "calibration_text": [{"decile": i + 1, "pred_vol_pct": vol(h[dec == i]),
-                                  "realized_vol_pct": vol(y[dec == i])} for i in range(10)],
-            "splits": [{k: v for k, v in s.items() if k not in ("h", "y")} for s in splits]}
-
-
-def _print(scope: str, rep: dict, W: int) -> None:
-    n = rep["n_splits"]
-    print(f"[{scope}] next-{W}-session Yang–Zhang variance, {n} random purged block splits, "
-          f"test samples/split ≈ {int(np.mean(rep['test_samples']))}")
-    print(f"{'predictor':12s} {'QLIKE':>16s} {'skill vs HAR':>18s} {'Spearman':>16s}")
-    for name in rep["qlike"]:
-        q, s, r = rep["qlike"][name], rep["skill_vs_har"][name], rep["spearman"][name]
-        print(f"{name:12s} {q[0]:8.4f}±{q[1]:.4f} {s[0]:+9.2%}±{s[1]:.2%} {r[0]:8.4f}±{r[1]:.4f}")
-    print("Diebold–Mariano on QLIKE (mean t over splits; first better in k of n):")
-    for p, t in rep["dm_t"].items():
-        print(f"  {p:22s} t={t[0]:+6.2f}±{t[1]:.2f}   first better in {rep['first_better'][p]}/{n}")
-    print(f"text model: PCs chosen {rep['selected_pcs']}, ridge {rep['selected_ridge']}")
-    print(f"calibration (text, pooled test, {scope}): predicted → realized vol by decile")
-    for r in rep["calibration_text"]:
-        print(f"  {r['decile']:2d}  {r['pred_vol_pct']:6.1f}% → {r['realized_vol_pct']:6.1f}%")
+def _print(rep: dict) -> None:
+    rows = [*((f"{f['from']}..{f['to']}", f) for f in rep["folds"]), ("all test days", rep["all"])]
+    print(f"next-{rep['window']}-session Yang–Zhang variance, walk-forward: "
+          f"test QLIKE (skill vs HAR)")
+    print(f"{'test period':24s}{'days':>5s}" + "".join(f"{n:>17s}" for n in NAMES))
+    for lab, r in rows:
+        print(f"{lab:24s}{r['days']:5d}" + "".join(
+            f"{r['qlike'][n]:9.4f}({r['skill_vs_har'][n]:+6.1%})" for n in NAMES))
+    print("Diebold–Mariano t on QLIKE (negative: the first is better)")
+    print(f"{'':24s}" + "".join(f"{lab[:10]:>12s}" for lab, _ in rows[:-1]) + f"{'all':>12s}")
+    for a, b in PAIRS:
+        p = f"{a} vs {b}"
+        print(f"{p:24s}" + "".join(f"{r['dm_t'][p]:+12.2f}" for _, r in rows))
+    print("text: (k, λ) chosen on validation: "
+          + ", ".join(f"({f['selection']['text']['pcs']}, {f['selection']['text']['ridge']:g})"
+                      for f in rep["folds"]))
+    print("calibration (text, all test days): predicted → realized vol by decile")
+    print("  " + "  ".join(f"{r['pred_vol_pct']:.0f}→{r['realized_vol_pct']:.0f}"
+                           for r in rep["calibration_text"]))
