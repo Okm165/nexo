@@ -1,12 +1,18 @@
+# credentials — never commit
+.env
+
+# data: inputs, derived artifacts, and everything the pipeline regenerates
 data/
+state/
 runs/
+
+# environments, caches, build output
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
-.env
-
-# derived data (rebuildable: )
-data/derived/
-state/
+.coverage
+dist/
+build/
+*.egg-info/
