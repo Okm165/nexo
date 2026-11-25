@@ -136,6 +136,11 @@ The OS environment overrides any key, so variants (`WINDOW=10`,
 `STATE_DIR=state/w10`, …) run without editing files. Paths are repo-relative;
 inputs are plain parquet.
 
+**Torch build.** The lockfile pins torch to a GPU-specific wheel index. On
+different hardware, point the index at your build before `uv sync`: CPU
+`https://download.pytorch.org/whl/cpu`, CUDA `…/cu121` (see
+`.github/workflows/ci.yml`, which runs the full test suite on the CPU build).
+
 ## Code
 
 ```

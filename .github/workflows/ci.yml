@@ -1,0 +1,12 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # the lockfile pins a GPU-specific torch index; CI runs the CPU build
+      - name: use the CPU torch index
+        run: sed -i 's#https://download.pytorch.org/whl/rocm[0-9.]*#https://download.pytorch.org/whl/cpu#g; s/pytorch-rocm/pytorch-cpu/g' pyproject.toml
+      - run: uv lock && uv sync && uv run pytest -q
