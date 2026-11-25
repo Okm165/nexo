@@ -53,7 +53,8 @@ def fit_qlike(A: np.ndarray, y: np.ndarray, penalty: np.ndarray | None = None,
             a = A[s:s + CHUNK]
             H += a.T @ (a * e[s:s + CHUNK, None]) / n
         # the p×p solve is cheap: do it in numpy float64, which raises on a
-        # singular system instead of aborting the process (GPU solver)
+        # singular system instead of aborting the process (raises; some GPU
+        # solver libraries abort instead)
         step = torch.from_numpy(np.linalg.solve(H.cpu().numpy(), g.cpu().numpy())).to(DEVICE)
         lr, f0 = 1.0, f(w)
         while f(w - lr * step) > f0 and lr > 1e-10:
