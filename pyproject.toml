@@ -1,0 +1,75 @@
+[project]
+name = "newsimpact"
+version = "0.1.0"
+description = "Next-window realized volatility forecasting from news headlines and prices"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+    "httpx>=0.27,<1",
+    "numpy>=2.0,<3",
+    "pyarrow>=18,<24",
+    "torch>=2.9,<2.11",
+    "transformers>=4.50,<6",
+]
+
+[project.scripts]
+newsimpact = "newsimpact.cli:main"
+
+[dependency-groups]
+dev = [
+    "pyarrow-stubs>=20.0.0.20260819",
+    "pyright>=1.1.390",
+    "pytest>=8.3,<9",
+    "ruff>=0.8,<1",
+]
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-rocm", marker = "sys_platform == 'linux'" }]
+triton-rocm = [{ index = "pytorch-rocm", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.1"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/newsimpact"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportUnknownLambdaType = false
+reportMissingParameterType = false
+reportUnusedCallResult = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "slow: exercises pretrained or GPU integration",
+]
