@@ -147,25 +147,39 @@ Diebold–Mariano t (negative: the first is better):
 | text vs intensity | −1.3 | −1.6 | −3.1 | +0.1 | −3.2 |
 | text vs shuffled | −2.0 | −3.0 | −3.5 | −0.5 | −4.5 |
 
+A pooled daily DM can be significant while the effect is unstable across
+years, so the four test years are also combined as a fold-level meta-test
+(mean of the per-year DM t over its standard error; the years are independent
+draws). With 25 DM tests in the table, per-year values below |2.8| are
+descriptive; the meta-test is the one to read:
+
+| comparison | per-year DM t | fold-level t | p |
+|---|---|---|---|
+| HAR vs persistence | −4.4, −6.9, −5.1, −7.8 | **−7.6** | **0.011** |
+| price vs HAR | −2.5, +1.2, −1.3, +0.2 | −0.7 | 0.784 |
+| intensity vs price | −0.7, −1.1, −0.7, +1.5 | −0.4 | 0.915 |
+| text vs intensity | −1.3, −1.6, −3.1, +0.1 | −2.3 | 0.221 |
+| text vs shuffled | −2.0, −3.0, −3.5, −0.5 | −3.5 | 0.090 |
+
 Calibration (text, all test days): predicted → realized vol by decile:
 21→20, 27→25, 31→30, 35→34, 40→40, 46→47, 53→55, 64→68, 81→90, 153→152.
 
 What this supports, and what it does not:
-- **HAR beats persistence everywhere** (pooled t −9.7; every year below −4).
-  This is the protocol-clean anchor: the target, the universe and the
-  evaluation pipeline measure real volatility predictability.
-- **The completed HAR (price) is a modest improvement**: +0.9% pooled,
-  t −2.2 — driven by 2023 and 2025; 2024 and 2026 are flat. Treated as
-  plausible but not established, because its design was chosen on 2022–2025.
-- **Headline content: not established.** Text beats the shuffled control in
-  all four periods (pooled t −4.5) and intensity in 2023 and 2025 — but 2023
-  and 2025 informed the design, and in 2026, the only design-clean period,
-  text is −0.4% vs intensity and −0.5% vs shuffled. Inside 2026 the pattern
-  tracks the feed: Jan–Mar text is +2.4% vs intensity, Apr–Nov −1.0%. The
-  honest conclusion is that headline content may add ~1–2%, but this archive
-  cannot demonstrate it.
+- **HAR beats persistence, established** (fold-level meta-test p 0.011; every
+  year below −4). This is the protocol-clean anchor: the target, the universe
+  and the evaluation pipeline measure real volatility predictability.
+- **Everything else is not established.** The completed HAR (price) is +0.9%
+  pooled but driven by 2023 (fold-level p 0.78). Text beats intensity by
+  +2.1% pooled (fold-level p 0.22) and the shuffled control (p 0.09) — but
+  2023 and 2025 informed the design, and in 2026, the only design-clean
+  period, text is −0.4% vs intensity and −0.5% vs shuffled, tracking the
+  feed (Jan–Mar +2.4% vs intensity, Apr–Nov −1.0%).
 - **The shuffled control stays behind intensity in every period** (−0.2% to
   −0.9%): added text flexibility alone buys nothing.
+- **What a reader may rely on:** the pipeline's forecasts are calibrated
+  (deciles above) and beat the naive bar by 53–71% every year. Any claim that
+  a specific *feature* adds skill requires data after 2026-11-16 — the only
+  periods never used for a design choice.
 
 ## Rejected on measurement (kept out of the model)
 
